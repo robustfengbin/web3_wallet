@@ -1,0 +1,40 @@
+# Backend (Rust)
+/backend/target/
+/backend/.env
+/backend/*.log
+
+# Frontend (Node.js)
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.env
+/frontend/.env.local
+/frontend/.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+/backend/logs/
+/frontend/logs/
+
+# Build
+*.pdb
+
+# Local development
+.env
+.env.local
+*.local
+
+# Claude Code
+.claude/
+.cc/

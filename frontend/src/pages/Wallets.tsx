@@ -1,0 +1,469 @@
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  Plus,
+  Upload,
+  Trash2,
+  Key,
+  CheckCircle,
+  RefreshCw,
+  Copy,
+} from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+import { Card, LoadingSpinner, Modal } from '../components/Common';
+import { walletService } from '../services/api';
+import { Wallet, BalanceResponse } from '../types';
+import { useAuth } from '../hooks/useAuth';
+
+export function Wallets() {
+  const { t } = useTranslation();
+  const { user } = useAuth();
+  const [wallets, setWallets] = useState<Wallet[]>([]);
+  const [balances, setBalances] = useState<Record<string, BalanceResponse>>({});
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  // Modal states
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [selectedWalletId, setSelectedWalletId] = useState<number | null>(null);
+
+  // Form states
+  const [walletName, setWalletName] = useState('');
+  const [privateKey, setPrivateKey] = useState('');
+  const [password, setPassword] = useState('');
+  const [exportedKey, setExportedKey] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // 防止 StrictMode 导致的重复调用
+  const isLoadingRef = useRef(false);
+
+  useEffect(() => {
+    // 防止重复加载
+    if (isLoadingRef.current) return;
+    isLoadingRef.current = true;
+    loadWallets().finally(() => {
+      isLoadingRef.current = false;
+    });
+  }, []);
+
+  const loadWallets = async () => {
+    try {
+      const data = await walletService.listWallets();
+      setWallets(data);
+
+      // Load balances for all wallets
+      const balancePromises = data.map((w) =>
+        walletService.getBalance(w.address, w.chain).catch(() => null)
+      );
+      const results = await Promise.all(balancePromises);
+      const newBalances: Record<string, BalanceResponse> = {};
+      results.forEach((balance, index) => {
+        if (balance) {
+          newBalances[data[index].address] = balance;
+        }
+      });
+      setBalances(newBalances);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load wallets');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleCreate = async () => {
+    if (!walletName.trim()) return;
+    setIsSubmitting(true);
+    try {
+      await walletService.createWallet({ name: walletName });
+      setSuccess(t('wallets.createSuccess'));
+      setShowCreateModal(false);
+      setWalletName('');
+      loadWallets();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create wallet');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleImport = async () => {
+    if (!walletName.trim() || !privateKey.trim()) return;
+    setIsSubmitting(true);
+    try {
+      await walletService.importWallet({
+        name: walletName,
+        private_key: privateKey,
+      });
+      setSuccess(t('wallets.importSuccess'));
+      setShowImportModal(false);
+      setWalletName('');
+      setPrivateKey('');
+      loadWallets();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to import wallet');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleExportKey = async () => {
+    if (!selectedWalletId || !password.trim()) return;
+    setIsSubmitting(true);
+    try {
+      const result = await walletService.exportPrivateKey(selectedWalletId, password);
+      setExportedKey(result.private_key);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to export key');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleSetActive = async (id: number) => {
+    try {
+      await walletService.setActiveWallet(id);
+      setSuccess(t('wallets.activeSuccess'));
+      loadWallets();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to set active wallet');
+    }
+  };
+
+  const handleDelete = async (id: number) => {
+    if (!confirm(t('wallets.confirmDelete'))) return;
+    try {
+      await walletService.deleteWallet(id);
+      setSuccess(t('wallets.deleteSuccess'));
+      loadWallets();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete wallet');
+    }
+  };
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setSuccess(t('wallets.copiedToClipboard'));
+  };
+
+  const isAdmin = user?.role === 'admin';
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <LoadingSpinner size="lg" />
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-bold text-gray-900">{t('wallets.title')}</h1>
+        {isAdmin && (
+          <div className="flex space-x-3">
+            <button
+              onClick={() => setShowCreateModal(true)}
+              className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+            >
+              <Plus className="w-4 h-4 mr-2" />
+              {t('wallets.createWallet')}
+            </button>
+            <button
+              onClick={() => setShowImportModal(true)}
+              className="flex items-center px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700"
+            >
+              <Upload className="w-4 h-4 mr-2" />
+              {t('wallets.importWallet')}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700">
+          {error}
+          <button onClick={() => setError('')} className="ml-2 underline">
+            {t('common.dismiss')}
+          </button>
+        </div>
+      )}
+
+      {success && (
+        <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg text-green-700">
+          {success}
+          <button onClick={() => setSuccess('')} className="ml-2 underline">
+            {t('common.dismiss')}
+          </button>
+        </div>
+      )}
+
+      <div className="grid gap-4">
+        {wallets.map((wallet) => (
+          <Card key={wallet.id}>
+            <div className="flex items-start justify-between">
+              <div className="flex-1">
+                <div className="flex items-center">
+                  <h3 className="text-lg font-semibold text-gray-900">
+                    {wallet.name}
+                  </h3>
+                  {wallet.is_active && (
+                    <span className="ml-2 px-2 py-0.5 bg-green-100 text-green-800 text-xs rounded-full">
+                      {t('common.active')}
+                    </span>
+                  )}
+                  <span className="ml-2 px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded-full uppercase">
+                    {wallet.chain}
+                  </span>
+                </div>
+
+                <div className="mt-2 flex items-center">
+                  <code className="text-sm text-gray-600 bg-gray-100 px-2 py-1 rounded">
+                    {wallet.address}
+                  </code>
+                  <button
+                    onClick={() => copyToClipboard(wallet.address)}
+                    className="ml-2 text-gray-400 hover:text-gray-600"
+                  >
+                    <Copy className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {balances[wallet.address] && (
+                  <div className="mt-3">
+                    <p className="text-sm text-gray-500">{t('wallets.balance')}</p>
+                    <p className="text-lg font-semibold">
+                      {parseFloat(balances[wallet.address].native_balance).toFixed(6)} ETH
+                    </p>
+                    {balances[wallet.address].tokens.length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-2">
+                        {balances[wallet.address].tokens.map((token) => (
+                          <span
+                            key={token.symbol}
+                            className="text-sm text-gray-600 bg-gray-100 px-2 py-0.5 rounded"
+                          >
+                            {parseFloat(token.balance).toFixed(2)} {token.symbol}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {isAdmin && (
+                <div className="flex space-x-2">
+                  <button
+                    onClick={() => loadWallets()}
+                    className="p-2 text-gray-400 hover:text-blue-600"
+                    title={t('wallets.refreshBalance')}
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                  </button>
+                  {!wallet.is_active && (
+                    <button
+                      onClick={() => handleSetActive(wallet.id)}
+                      className="p-2 text-gray-400 hover:text-green-600"
+                      title={t('wallets.setAsActive')}
+                    >
+                      <CheckCircle className="w-4 h-4" />
+                    </button>
+                  )}
+                  <button
+                    onClick={() => {
+                      setSelectedWalletId(wallet.id);
+                      setExportedKey('');
+                      setPassword('');
+                      setShowExportModal(true);
+                    }}
+                    className="p-2 text-gray-400 hover:text-yellow-600"
+                    title={t('wallets.exportPrivateKey')}
+                  >
+                    <Key className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => handleDelete(wallet.id)}
+                    className="p-2 text-gray-400 hover:text-red-600"
+                    title={t('wallets.deleteWallet')}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
+            </div>
+          </Card>
+        ))}
+
+        {wallets.length === 0 && (
+          <Card>
+            <p className="text-center text-gray-500 py-8">
+              {t('wallets.noWallets')}
+            </p>
+          </Card>
+        )}
+      </div>
+
+      {/* Create Wallet Modal */}
+      <Modal
+        isOpen={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        title={t('wallets.createWallet')}
+      >
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {t('wallets.walletName')}
+            </label>
+            <input
+              type="text"
+              value={walletName}
+              onChange={(e) => setWalletName(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder={t('wallets.walletNamePlaceholder')}
+            />
+          </div>
+          <div className="flex justify-end space-x-3">
+            <button
+              onClick={() => setShowCreateModal(false)}
+              className="px-4 py-2 text-gray-600 hover:text-gray-800"
+            >
+              {t('common.cancel')}
+            </button>
+            <button
+              onClick={handleCreate}
+              disabled={isSubmitting || !walletName.trim()}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+            >
+              {isSubmitting ? <LoadingSpinner size="sm" /> : t('wallets.create')}
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Import Wallet Modal */}
+      <Modal
+        isOpen={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        title={t('wallets.importWallet')}
+      >
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {t('wallets.walletName')}
+            </label>
+            <input
+              type="text"
+              value={walletName}
+              onChange={(e) => setWalletName(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder={t('wallets.walletNamePlaceholder')}
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {t('wallets.privateKey')}
+            </label>
+            <input
+              type="password"
+              value={privateKey}
+              onChange={(e) => setPrivateKey(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+              placeholder={t('wallets.privateKeyPlaceholder')}
+            />
+          </div>
+          <div className="flex justify-end space-x-3">
+            <button
+              onClick={() => setShowImportModal(false)}
+              className="px-4 py-2 text-gray-600 hover:text-gray-800"
+            >
+              {t('common.cancel')}
+            </button>
+            <button
+              onClick={handleImport}
+              disabled={isSubmitting || !walletName.trim() || !privateKey.trim()}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+            >
+              {isSubmitting ? <LoadingSpinner size="sm" /> : t('wallets.import')}
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Export Private Key Modal */}
+      <Modal
+        isOpen={showExportModal}
+        onClose={() => {
+          setShowExportModal(false);
+          setExportedKey('');
+          setPassword('');
+        }}
+        title={t('wallets.exportKeyTitle')}
+      >
+        <div className="space-y-4">
+          {!exportedKey ? (
+            <>
+              <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-yellow-800 text-sm">
+                {t('wallets.exportKeyWarning')}
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  {t('wallets.exportKeyConfirm')}
+                </label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder={t('login.password')}
+                />
+              </div>
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => setShowExportModal(false)}
+                  className="px-4 py-2 text-gray-600 hover:text-gray-800"
+                >
+                  {t('common.cancel')}
+                </button>
+                <button
+                  onClick={handleExportKey}
+                  disabled={isSubmitting || !password.trim()}
+                  className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+                >
+                  {isSubmitting ? <LoadingSpinner size="sm" /> : t('wallets.export')}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-800 text-sm">
+                {t('wallets.keepSecure')}
+              </div>
+              <div className="p-3 bg-gray-100 rounded-lg">
+                <code className="text-sm break-all">{exportedKey}</code>
+              </div>
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={() => copyToClipboard(exportedKey)}
+                  className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700"
+                >
+                  {t('common.copy')}
+                </button>
+                <button
+                  onClick={() => {
+                    setShowExportModal(false);
+                    setExportedKey('');
+                    setPassword('');
+                  }}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                >
+                  {t('common.done')}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </Modal>
+    </div>
+  );
+}

@@ -1,0 +1,53 @@
+use actix_web::web;
+use std::sync::Arc;
+
+use super::handlers;
+use super::middleware::AuthMiddleware;
+use crate::services::AuthService;
+
+pub fn configure_routes(cfg: &mut web::ServiceConfig, auth_service: Arc<AuthService>) {
+    cfg.service(
+        web::scope("/api/v1")
+            // Public routes
+            .route("/auth/login", web::post().to(handlers::login))
+            .route("/health", web::get().to(health_check))
+            // Protected routes
+            .service(
+                web::scope("")
+                    .wrap(AuthMiddleware { auth_service })
+                    // Auth routes
+                    .route("/auth/logout", web::post().to(handlers::logout))
+                    .route("/auth/password", web::put().to(handlers::change_password))
+                    .route("/auth/me", web::get().to(handlers::me))
+                    // Wallet routes
+                    .route("/wallets", web::get().to(handlers::list_wallets))
+                    .route("/wallets", web::post().to(handlers::create_wallet))
+                    .route("/wallets/import", web::post().to(handlers::import_wallet))
+                    .route("/wallets/balance", web::get().to(handlers::get_balance))
+                    .route("/wallets/{id}", web::get().to(handlers::get_wallet))
+                    .route("/wallets/{id}", web::delete().to(handlers::delete_wallet))
+                    .route("/wallets/{id}/activate", web::put().to(handlers::set_active_wallet))
+                    .route("/wallets/{id}/export-key", web::post().to(handlers::export_private_key))
+                    // Transfer routes
+                    .route("/transfers", web::get().to(handlers::list_transfers))
+                    .route("/transfers", web::post().to(handlers::initiate_transfer))
+                    .route("/transfers/estimate-gas", web::post().to(handlers::estimate_gas))
+                    .route("/transfers/{id}", web::get().to(handlers::get_transfer))
+                    .route("/transfers/{id}/execute", web::post().to(handlers::execute_transfer))
+                    // Chain routes
+                    .route("/chains", web::get().to(handlers::list_chains))
+                    // Settings routes
+                    .route("/settings/rpc/presets", web::get().to(handlers::get_rpc_presets))
+                    .route("/settings/rpc", web::get().to(handlers::get_rpc_config))
+                    .route("/settings/rpc", web::put().to(handlers::update_rpc_config))
+                    .route("/settings/rpc/test", web::post().to(handlers::test_rpc_endpoint)),
+            ),
+    );
+}
+
+async fn health_check() -> actix_web::HttpResponse {
+    actix_web::HttpResponse::Ok().json(serde_json::json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION")
+    }))
+}

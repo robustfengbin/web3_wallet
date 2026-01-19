@@ -1,0 +1,177 @@
+use config::{Config, ConfigError, Environment, File};
+use serde::Deserialize;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerConfig {
+    pub host: String,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DatabaseConfig {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub password: String,
+    pub name: String,
+    pub max_connections: u32,
+}
+
+impl DatabaseConfig {
+    pub fn url(&self) -> String {
+        format!(
+            "mysql://{}:{}@{}:{}/{}",
+            self.user, self.password, self.host, self.port, self.name
+        )
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct JwtConfig {
+    pub secret: String,
+    pub expire_hours: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SecurityConfig {
+    pub encryption_key: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EthereumConfig {
+    pub rpc_url: String,
+    pub chain_id: u64,
+    pub fallback_rpcs: Vec<String>,
+    /// HTTP/HTTPS/SOCKS5 proxy for RPC requests (e.g., "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080")
+    pub rpc_proxy: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppConfig {
+    pub server: ServerConfig,
+    pub database: DatabaseConfig,
+    pub jwt: JwtConfig,
+    pub security: SecurityConfig,
+    pub ethereum: EthereumConfig,
+}
+
+impl AppConfig {
+    pub fn load() -> Result<Self, ConfigError> {
+        // Load .env file if exists
+        let _ = dotenvy::dotenv();
+
+        let config = Config::builder()
+            // Server defaults
+            .set_default("server.host", "127.0.0.1")?
+            .set_default("server.port", 8080)?
+            // Database defaults
+            .set_default("database.host", "localhost")?
+            .set_default("database.port", 3306)?
+            .set_default("database.user", "root")?
+            .set_default("database.password", "")?
+            .set_default("database.name", "web3_wallet")?
+            .set_default("database.max_connections", 20)?
+            // JWT defaults
+            .set_default("jwt.secret", "change-me-in-production-please!")?
+            .set_default("jwt.expire_hours", 24)?
+            // Security defaults
+            .set_default("security.encryption_key", "32-byte-encryption-key-here!!!!!")?
+            // Ethereum defaults
+            .set_default("ethereum.chain_id", 1)?
+            .set_default("ethereum.rpc_url", "https://eth.llamarpc.com")?
+            .set_default(
+                "ethereum.fallback_rpcs",
+                vec![
+                    "https://rpc.ankr.com/eth",
+                    "https://ethereum.publicnode.com",
+                    "https://1rpc.io/eth",
+                ],
+            )?
+            // RPC proxy (optional) - can be set via WEB3_ETHEREUM__RPC_PROXY env var
+            .set_default("ethereum.rpc_proxy", Option::<String>::None)?
+            // Load from config.toml if exists
+            .add_source(File::with_name("config").required(false))
+            // Override with environment variables (prefix: WEB3_)
+            // Use __ as separator so WEB3_SECURITY__ENCRYPTION_KEY -> security.encryption_key
+            .add_source(
+                Environment::with_prefix("WEB3")
+                    .prefix_separator("_")
+                    .separator("__")
+                    .try_parsing(true),
+            )
+            .build()?;
+
+        let app_config: AppConfig = config.try_deserialize()?;
+
+        // Validate configuration
+        app_config.validate()?;
+
+        Ok(app_config)
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        // Validate encryption key length (must be 32 bytes for AES-256)
+        if self.security.encryption_key.len() != 32 {
+            return Err(ConfigError::Message(
+                "Encryption key must be exactly 32 bytes".to_string(),
+            ));
+        }
+
+        // Validate JWT secret is not empty
+        if self.jwt.secret.is_empty() {
+            return Err(ConfigError::Message(
+                "JWT secret cannot be empty".to_string(),
+            ));
+        }
+
+        // Validate database config
+        if self.database.host.is_empty() {
+            return Err(ConfigError::Message(
+                "Database host cannot be empty".to_string(),
+            ));
+        }
+        if self.database.name.is_empty() {
+            return Err(ConfigError::Message(
+                "Database name cannot be empty".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 8080,
+            },
+            database: DatabaseConfig {
+                host: "localhost".to_string(),
+                port: 3306,
+                user: "root".to_string(),
+                password: "password".to_string(),
+                name: "web3_wallet".to_string(),
+                max_connections: 20,
+            },
+            jwt: JwtConfig {
+                secret: "change-me-in-production".to_string(),
+                expire_hours: 24,
+            },
+            security: SecurityConfig {
+                encryption_key: "32-byte-encryption-key-here!!!!!".to_string(),
+            },
+            ethereum: EthereumConfig {
+                rpc_url: "https://eth.llamarpc.com".to_string(),
+                chain_id: 1,
+                fallback_rpcs: vec![
+                    "https://rpc.ankr.com/eth".to_string(),
+                    "https://ethereum.publicnode.com".to_string(),
+                    "https://1rpc.io/eth".to_string(),
+                ],
+                rpc_proxy: None,
+            },
+        }
+    }
+}
