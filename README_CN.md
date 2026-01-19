@@ -311,6 +311,12 @@ pub static SUPPORTED_TOKENS: Lazy<HashMap<&'static str, TokenInfo>> = Lazy::new(
 RUST_LOG=info,sqlx=warn
 ```
 
+## 支持项目
+
+如果这个项目对你有帮助，欢迎支持一下：
+
+**ETH / USDT / USDC (ERC20):** `0xD76f061DaEcfC3ddaD7902A8Ff7c47FC68b3Dc49`
+
 ## 开源协议
 
 MIT License

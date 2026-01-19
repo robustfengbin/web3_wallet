@@ -311,6 +311,12 @@ Backend logs are written to `backend/logs/web3-wallet.log` with:
 RUST_LOG=info,sqlx=warn
 ```
 
+## Support
+
+If you find this project useful, consider supporting the development:
+
+**ETH / USDT / USDC (ERC20):** `0xD76f061DaEcfC3ddaD7902A8Ff7c47FC68b3Dc49`
+
 ## License
 
 MIT License
