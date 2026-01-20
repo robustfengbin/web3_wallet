@@ -1,17 +1,23 @@
 import React, { useState, useEffect } from 'react';
 import { ArrowRight, AlertCircle, CheckCircle, Wallet, Fuel, Calculator } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { Card, LoadingSpinner, TokenSelector, getTokenConfig } from '../components/Common';
-import { walletService, transferService } from '../services/api';
-import { Wallet as WalletType, Transfer as TransferType, ChainInfo, BalanceResponse } from '../types';
-import { useAuth } from '../hooks/useAuth';
-import type { GasEstimateResponse } from '../services/api/transfer';
+import { Card, LoadingSpinner } from '../../../components/Common';
+import { walletService, transferService } from '../../../services/api';
+import { Wallet as WalletType, Transfer as TransferType, BalanceResponse } from '../../../types';
+import { useAuth } from '../../../hooks/useAuth';
+import { getChain, ChainConfig, isNativeToken } from '../../../config/chains';
+import type { GasEstimateResponse } from '../../../services/api/transfer';
 
-export function Transfer() {
+interface ChainTransferProps {
+  chainId: string;
+}
+
+export function ChainTransfer({ chainId }: ChainTransferProps) {
   const { t } = useTranslation();
   const { user } = useAuth();
+  const chain = getChain(chainId) as ChainConfig;
+
   const [wallets, setWallets] = useState<WalletType[]>([]);
-  const [chains, setChains] = useState<ChainInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -27,18 +33,22 @@ export function Transfer() {
   const [isEstimating, setIsEstimating] = useState(false);
 
   // Form state
-  const [chain, setChain] = useState('ethereum');
   const [toAddress, setToAddress] = useState('');
-  const [token, setToken] = useState('ETH');
+  const [token, setToken] = useState(chain.symbol);
   const [amount, setAmount] = useState('');
   const [gasPriceGwei, setGasPriceGwei] = useState('');
   const [gasLimit, setGasLimit] = useState('');
 
   useEffect(() => {
     loadData();
-  }, []);
+  }, [chainId]);
 
-  const activeWallet = wallets.find((w) => w.is_active && w.chain === chain);
+  // Reset token when chain changes
+  useEffect(() => {
+    setToken(chain.symbol);
+  }, [chain.symbol]);
+
+  const activeWallet = wallets.find((w) => w.is_active && w.chain === chainId);
 
   // Load wallet balance when active wallet changes
   useEffect(() => {
@@ -50,13 +60,10 @@ export function Transfer() {
   }, [activeWallet?.address, activeWallet?.chain]);
 
   const loadData = async () => {
+    setIsLoading(true);
     try {
-      const [walletsData, chainsData] = await Promise.all([
-        walletService.listWallets(),
-        transferService.listChains(),
-      ]);
+      const walletsData = await walletService.listWallets(chainId);
       setWallets(walletsData);
-      setChains(chainsData);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load data');
     } finally {
@@ -85,10 +92,10 @@ export function Transfer() {
     setGasEstimate(null);
 
     try {
-      // First estimate gas
+      // First estimate gas/fee
       setIsEstimating(true);
       const estimate = await transferService.estimateGas({
-        chain,
+        chain: chainId,
         to_address: toAddress,
         token,
         amount,
@@ -98,7 +105,7 @@ export function Transfer() {
 
       // Then initiate transfer
       const transfer = await transferService.initiateTransfer({
-        chain,
+        chain: chainId,
         to_address: toAddress,
         token,
         amount,
@@ -149,7 +156,7 @@ export function Transfer() {
   // Get current token balance
   const getCurrentTokenBalance = () => {
     if (!walletBalance) return '0';
-    if (token === 'ETH' || token === 'ZEC') {
+    if (isNativeToken(chainId, token)) {
       return walletBalance.native_balance;
     }
     const tokenBalance = walletBalance.tokens.find(t => t.symbol === token);
@@ -165,16 +172,17 @@ export function Transfer() {
   };
 
   // Calculate native token balance after fee
-  const getEthAfterGas = () => {
+  const getNativeAfterFee = () => {
     if (!walletBalance || !gasEstimate) return null;
     const nativeBalance = parseFloat(walletBalance.native_balance);
     const fee = parseFloat(gasEstimate.estimated_fee_eth);
-    const transferAmount = (token === 'ETH' || token === 'ZEC') ? parseFloat(amount) || 0 : 0;
+    const transferAmount = isNativeToken(chainId, token) ? parseFloat(amount) || 0 : 0;
     const afterBalance = nativeBalance - fee - transferAmount;
     return Math.max(0, afterBalance).toFixed(6);
   };
 
   const isAdmin = user?.role === 'admin';
+  const isEVM = chainId === 'ethereum'; // For gas-related UI
 
   if (isLoading) {
     return (
@@ -197,7 +205,20 @@ export function Transfer() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-gray-900 mb-6">{t('transfer.title')}</h1>
+      <div className="flex items-center mb-6">
+        <span
+          className="w-10 h-10 rounded-full flex items-center justify-center text-white text-xl mr-3"
+          style={{ backgroundColor: chain.color }}
+        >
+          {chain.icon}
+        </span>
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">
+            {chain.name} {t('transfer.title')}
+          </h1>
+          <p className="text-sm text-gray-500">{t('chains.sendTokens', { chain: chain.name })}</p>
+        </div>
+      </div>
 
       {error && (
         <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 flex items-center">
@@ -247,7 +268,7 @@ export function Transfer() {
                       ) : walletBalance ? (
                         <div className="text-right">
                           <p className="font-semibold text-gray-900">
-                            {parseFloat(walletBalance.native_balance).toFixed(6)} {chain === 'zcash' ? 'ZEC' : 'ETH'}
+                            {parseFloat(walletBalance.native_balance).toFixed(6)} {chain.symbol}
                           </p>
                           {walletBalance.tokens.length > 0 && (
                             <div className="flex flex-wrap gap-1 justify-end mt-1">
@@ -276,26 +297,39 @@ export function Transfer() {
                   value={toAddress}
                   onChange={(e) => setToAddress(e.target.value)}
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
-                  placeholder={chain === 'zcash' ? 't1...' : '0x...'}
+                  placeholder={chain.addressPrefix + '...'}
                   required
                 />
               </div>
 
-              {/* Token Selector with Chain */}
+              {/* Token Selector */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
                   {t('transfer.selectToken')}
                 </label>
-                <TokenSelector
-                  selectedToken={token}
-                  selectedChain={chain}
-                  onSelect={(newToken, newChain) => {
-                    setToken(newToken);
-                    setChain(newChain);
-                  }}
-                  balance={getCurrentTokenBalance()}
-                  disabled={pendingTransfer !== null}
-                />
+                <div className="grid grid-cols-3 gap-2">
+                  {chain.tokens.map((tk) => (
+                    <button
+                      key={tk.symbol}
+                      type="button"
+                      onClick={() => setToken(tk.symbol)}
+                      disabled={pendingTransfer !== null}
+                      className={`flex items-center justify-center px-3 py-2 border rounded-lg transition-colors ${
+                        token === tk.symbol
+                          ? 'border-blue-500 bg-blue-50 text-blue-700'
+                          : 'border-gray-300 hover:border-gray-400'
+                      } ${pendingTransfer !== null ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    >
+                      <span
+                        className="w-5 h-5 rounded-full flex items-center justify-center text-white text-xs mr-2"
+                        style={{ backgroundColor: tk.color }}
+                      >
+                        {tk.icon}
+                      </span>
+                      <span className="font-medium">{tk.symbol}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {/* Amount Input */}
@@ -327,37 +361,41 @@ export function Transfer() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    {t('transfer.gasPrice')}
-                  </label>
-                  <input
-                    type="text"
-                    value={gasPriceGwei}
-                    onChange={(e) => setGasPriceGwei(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    placeholder={t('transfer.auto')}
-                  />
+              {/* Gas/Fee Settings - Only for EVM chains */}
+              {isEVM && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      {t('transfer.gasPrice')}
+                    </label>
+                    <input
+                      type="text"
+                      value={gasPriceGwei}
+                      onChange={(e) => setGasPriceGwei(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder={t('transfer.auto')}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      {t('transfer.gasLimit')}
+                    </label>
+                    <input
+                      type="text"
+                      value={gasLimit}
+                      onChange={(e) => setGasLimit(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder={t('transfer.auto')}
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    {t('transfer.gasLimit')}
-                  </label>
-                  <input
-                    type="text"
-                    value={gasLimit}
-                    onChange={(e) => setGasLimit(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    placeholder={t('transfer.auto')}
-                  />
-                </div>
-              </div>
+              )}
 
               <button
                 type="submit"
                 disabled={isSubmitting || pendingTransfer !== null}
-                className="w-full flex items-center justify-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                className="w-full flex items-center justify-center px-4 py-2 text-white rounded-lg hover:opacity-90 disabled:opacity-50"
+                style={{ backgroundColor: chain.color }}
               >
                 {isSubmitting ? (
                   <LoadingSpinner size="sm" />
@@ -400,42 +438,29 @@ export function Transfer() {
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-gray-500">{t('transfer.amount')}:</span>
-                  <div className="flex items-center space-x-2">
-                    {(() => {
-                      const tokenConfig = getTokenConfig(pendingTransfer.token, pendingTransfer.chain);
-                      return tokenConfig ? (
-                        <div
-                          className="w-5 h-5 rounded-full flex items-center justify-center text-white text-xs"
-                          style={{ backgroundColor: tokenConfig.color }}
-                        >
-                          {tokenConfig.icon}
-                        </div>
-                      ) : null;
-                    })()}
-                    <span className="font-semibold">
-                      {parseFloat(pendingTransfer.amount).toFixed(6)} {pendingTransfer.token}
-                    </span>
-                  </div>
+                  <span className="font-semibold">
+                    {parseFloat(pendingTransfer.amount).toFixed(6)} {pendingTransfer.token}
+                  </span>
                 </div>
                 <div className="flex justify-between items-center">
                   <span className="text-gray-500">{t('transfer.chain')}:</span>
                   <div className="flex items-center space-x-1 text-sm">
-                    <span>⟠</span>
-                    <span>{getTokenConfig(pendingTransfer.token, pendingTransfer.chain)?.chainName || pendingTransfer.chain}</span>
+                    <span>{chain.icon}</span>
+                    <span>{chain.name}</span>
                   </div>
                 </div>
               </div>
 
-              {/* Gas & Fee Details */}
+              {/* Fee Details */}
               {gasEstimate && (
                 <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg space-y-3">
                   <div className="flex items-center text-blue-800 font-medium">
                     <Fuel className="w-4 h-4 mr-2" />
-                    {t('transfer.feeDetails')} {chain !== 'zcash' && '(EIP-1559)'}
+                    {t('transfer.feeDetails')} {isEVM && '(EIP-1559)'}
                   </div>
 
                   <div className="space-y-2 text-sm">
-                    {chain !== 'zcash' && (
+                    {isEVM && (
                       <>
                         <div className="flex justify-between">
                           <span className="text-gray-600">Gas Limit:</span>
@@ -449,23 +474,17 @@ export function Transfer() {
                         )}
                         {gasEstimate.priority_fee_gwei && (
                           <div className="flex justify-between">
-                            <span className="text-gray-600">Priority Fee (Tip):</span>
+                            <span className="text-gray-600">Priority Fee:</span>
                             <span className="font-mono">{parseFloat(gasEstimate.priority_fee_gwei).toFixed(1)} Gwei</span>
-                          </div>
-                        )}
-                        {gasEstimate.max_fee_gwei && (
-                          <div className="flex justify-between">
-                            <span className="text-gray-600">Max Fee:</span>
-                            <span className="font-mono">{parseFloat(gasEstimate.max_fee_gwei).toFixed(4)} Gwei</span>
                           </div>
                         )}
                         <div className="border-t border-blue-200 my-2"></div>
                       </>
                     )}
                     <div className="flex justify-between">
-                      <span className="text-gray-600">{t('transfer.estimatedFee')}{chain !== 'zcash' && ' (Max)'}:</span>
+                      <span className="text-gray-600">{t('transfer.estimatedFee')}:</span>
                       <span className="font-semibold text-orange-600">
-                        {parseFloat(gasEstimate.estimated_fee_eth).toFixed(8)} {chain === 'zcash' ? 'ZEC' : 'ETH'}
+                        {parseFloat(gasEstimate.estimated_fee_eth).toFixed(8)} {chain.symbol}
                       </span>
                     </div>
                   </div>
@@ -481,7 +500,6 @@ export function Transfer() {
                   </div>
 
                   <div className="space-y-2 text-sm">
-                    {/* Recipient receives */}
                     <div className="flex justify-between">
                       <span className="text-gray-600">{t('transfer.recipientReceives')}:</span>
                       <span className="font-semibold text-green-600">
@@ -489,7 +507,6 @@ export function Transfer() {
                       </span>
                     </div>
 
-                    {/* Your token balance after */}
                     <div className="flex justify-between">
                       <span className="text-gray-600">{t('transfer.yourBalanceAfter')} ({token}):</span>
                       <span className="font-mono">
@@ -497,22 +514,20 @@ export function Transfer() {
                       </span>
                     </div>
 
-                    {/* Your native token balance after (if transferring non-native token) */}
-                    {token !== 'ETH' && token !== 'ZEC' && (
+                    {!isNativeToken(chainId, token) && (
                       <div className="flex justify-between">
-                        <span className="text-gray-600">{t('transfer.yourBalanceAfter')} ({chain === 'zcash' ? 'ZEC' : 'ETH'}):</span>
+                        <span className="text-gray-600">{t('transfer.yourBalanceAfter')} ({chain.symbol}):</span>
                         <span className="font-mono">
-                          {getEthAfterGas()} {chain === 'zcash' ? 'ZEC' : 'ETH'}
+                          {getNativeAfterFee()} {chain.symbol}
                         </span>
                       </div>
                     )}
 
-                    {/* Total cost for native token transfer */}
-                    {(token === 'ETH' || token === 'ZEC') && (
+                    {isNativeToken(chainId, token) && (
                       <div className="flex justify-between pt-2 border-t border-gray-300">
                         <span className="text-gray-700 font-medium">{t('transfer.totalCost')}:</span>
                         <span className="font-semibold text-red-600">
-                          -{(parseFloat(amount || '0') + parseFloat(gasEstimate.estimated_fee_eth)).toFixed(8)} {chain === 'zcash' ? 'ZEC' : 'ETH'}
+                          -{(parseFloat(amount || '0') + parseFloat(gasEstimate.estimated_fee_eth)).toFixed(8)} {chain.symbol}
                         </span>
                       </div>
                     )}

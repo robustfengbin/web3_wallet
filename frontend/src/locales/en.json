@@ -34,7 +34,10 @@
     "transfer": "Transfer",
     "history": "History",
     "settings": "Settings",
-    "loggedInAs": "Logged in as"
+    "loggedInAs": "Logged in as",
+    "chains": "Chains",
+    "general": "General",
+    "rpcSettings": "RPC Settings"
   },
   "header": {
     "title": "Ethereum Wallet Manager",
@@ -77,7 +80,8 @@
     "exportKeyWarning": "Warning: Your private key gives full control over your wallet. Never share it with anyone.",
     "exportKeyConfirm": "Enter your password to confirm",
     "keepSecure": "Keep this private key secure. Anyone with access to it can control your funds.",
-    "export": "Export"
+    "export": "Export",
+    "selectChain": "Select Chain"
   },
   "transfer": {
     "title": "Transfer",

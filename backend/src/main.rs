@@ -13,7 +13,7 @@ use tokio::time::{interval, Duration};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use api::handlers::load_rpc_config_from_db;
-use blockchain::{ethereum::EthereumClient, ChainRegistry};
+use blockchain::{ethereum::EthereumClient, zcash::ZcashClient, ChainRegistry};
 use config::AppConfig;
 use db::repositories::{SettingsRepository, TransferRepository, UserRepository, WalletRepository};
 use services::{AuthService, TransferService, WalletService};
@@ -101,9 +101,15 @@ async fn main() -> std::io::Result<()> {
         EthereumClient::new(&eth_config).expect("Failed to create Ethereum client"),
     );
 
+    // Initialize Zcash client
+    let zcash_client = Arc::new(
+        ZcashClient::new(&config.zcash).expect("Failed to create Zcash client"),
+    );
+
     // Initialize chain registry
     let mut chain_registry = ChainRegistry::new();
     chain_registry.register(eth_client.clone());
+    chain_registry.register(zcash_client.clone());
 
     let chain_registry = Arc::new(chain_registry);
 

@@ -1,10 +1,12 @@
-use ethers::signers::{LocalWallet, Signer};
-use rand::thread_rng;
 use std::sync::Arc;
 
 use crate::blockchain::ChainRegistry;
 use crate::config::SecurityConfig;
-use crate::crypto::{decrypt, encrypt};
+use crate::crypto::{
+    decrypt, encrypt,
+    generate_ethereum_wallet, import_ethereum_wallet,
+    generate_zcash_wallet, import_zcash_wallet,
+};
 use crate::db::models::{BalanceResponse, TokenBalance, Wallet, WalletResponse};
 use crate::db::repositories::WalletRepository;
 use crate::error::{AppError, AppResult};
@@ -33,10 +35,11 @@ impl WalletService {
         // Verify chain is supported
         self.chain_registry.get(chain)?;
 
-        // Generate new wallet
-        let wallet = LocalWallet::new(&mut thread_rng());
-        let address = format!("{:?}", wallet.address());
-        let private_key = hex::encode(wallet.signer().to_bytes());
+        // Generate wallet based on chain type
+        let (address, private_key) = match chain {
+            "zcash" => generate_zcash_wallet()?,
+            "ethereum" | _ => generate_ethereum_wallet()?,
+        };
 
         // Check if address already exists
         if self.wallet_repo.find_by_address(&address, chain).await?.is_some() {
@@ -74,13 +77,13 @@ impl WalletService {
         // Verify chain is supported
         self.chain_registry.get(chain)?;
 
-        // Parse and validate private key
+        // Parse and validate private key based on chain type
         let key = private_key.strip_prefix("0x").unwrap_or(private_key);
-        let wallet: LocalWallet = key
-            .parse()
-            .map_err(|e| AppError::ValidationError(format!("Invalid private key: {}", e)))?;
 
-        let address = format!("{:?}", wallet.address());
+        let address = match chain {
+            "zcash" => import_zcash_wallet(key)?,
+            "ethereum" | _ => import_ethereum_wallet(key)?,
+        };
 
         // Check if address already exists
         if self.wallet_repo.find_by_address(&address, chain).await?.is_some() {

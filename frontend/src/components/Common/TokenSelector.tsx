@@ -58,6 +58,15 @@ export const TOKENS: TokenConfig[] = [
     chainIcon: '⟠',
     color: '#EC4899',
   },
+  {
+    symbol: 'ZEC',
+    name: 'Zcash',
+    chain: 'zcash',
+    chainName: 'Zcash Mainnet',
+    icon: 'Ⓩ',
+    chainIcon: 'Ⓩ',
+    color: '#F4B728',
+  },
 ];
 
 interface TokenSelectorProps {

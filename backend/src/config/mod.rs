@@ -47,12 +47,25 @@ pub struct EthereumConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct ZcashConfig {
+    pub rpc_url: String,
+    pub fallback_rpcs: Vec<String>,
+    /// HTTP/HTTPS/SOCKS5 proxy for RPC requests
+    pub rpc_proxy: Option<String>,
+    /// RPC username for authentication
+    pub rpc_user: Option<String>,
+    /// RPC password for authentication
+    pub rpc_password: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub jwt: JwtConfig,
     pub security: SecurityConfig,
     pub ethereum: EthereumConfig,
+    pub zcash: ZcashConfig,
 }
 
 impl AppConfig {
@@ -89,6 +102,12 @@ impl AppConfig {
             )?
             // RPC proxy (optional) - can be set via WEB3_ETHEREUM__RPC_PROXY env var
             .set_default("ethereum.rpc_proxy", Option::<String>::None)?
+            // Zcash defaults
+            .set_default("zcash.rpc_url", "http://127.0.0.1:8232")?
+            .set_default("zcash.fallback_rpcs", Vec::<String>::new())?
+            .set_default("zcash.rpc_proxy", Option::<String>::None)?
+            .set_default("zcash.rpc_user", Option::<String>::None)?
+            .set_default("zcash.rpc_password", Option::<String>::None)?
             // Load from config.toml if exists
             .add_source(File::with_name("config").required(false))
             // Override with environment variables (prefix: WEB3_)
@@ -171,6 +190,13 @@ impl Default for AppConfig {
                     "https://1rpc.io/eth".to_string(),
                 ],
                 rpc_proxy: None,
+            },
+            zcash: ZcashConfig {
+                rpc_url: "http://127.0.0.1:8232".to_string(),
+                fallback_rpcs: vec![],
+                rpc_proxy: None,
+                rpc_user: None,
+                rpc_password: None,
             },
         }
     }

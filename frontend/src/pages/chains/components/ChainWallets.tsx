@@ -9,14 +9,21 @@ import {
   Copy,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { Card, LoadingSpinner, Modal } from '../components/Common';
-import { walletService } from '../services/api';
-import { Wallet, BalanceResponse } from '../types';
-import { useAuth } from '../hooks/useAuth';
+import { Card, LoadingSpinner, Modal } from '../../../components/Common';
+import { walletService } from '../../../services/api';
+import { Wallet, BalanceResponse } from '../../../types';
+import { useAuth } from '../../../hooks/useAuth';
+import { getChain, ChainConfig } from '../../../config/chains';
 
-export function Wallets() {
+interface ChainWalletsProps {
+  chainId: string;
+}
+
+export function ChainWallets({ chainId }: ChainWalletsProps) {
   const { t } = useTranslation();
   const { user } = useAuth();
+  const chain = getChain(chainId) as ChainConfig;
+
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [balances, setBalances] = useState<Record<string, BalanceResponse>>({});
   const [isLoading, setIsLoading] = useState(true);
@@ -32,32 +39,24 @@ export function Wallets() {
   // Form states
   const [walletName, setWalletName] = useState('');
   const [privateKey, setPrivateKey] = useState('');
-  const [selectedChain, setSelectedChain] = useState('ethereum');
   const [password, setPassword] = useState('');
   const [exportedKey, setExportedKey] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Chain options
-  const chainOptions = [
-    { id: 'ethereum', name: 'Ethereum', symbol: 'ETH', icon: '⟠' },
-    { id: 'zcash', name: 'Zcash', symbol: 'ZEC', icon: 'Ⓩ' },
-  ];
-
-  // 防止 StrictMode 导致的重复调用
   const isLoadingRef = useRef(false);
 
   useEffect(() => {
-    // 防止重复加载
     if (isLoadingRef.current) return;
     isLoadingRef.current = true;
     loadWallets().finally(() => {
       isLoadingRef.current = false;
     });
-  }, []);
+  }, [chainId]);
 
   const loadWallets = async () => {
+    setIsLoading(true);
     try {
-      const data = await walletService.listWallets();
+      const data = await walletService.listWallets(chainId);
       setWallets(data);
 
       // Load balances for all wallets
@@ -83,11 +82,10 @@ export function Wallets() {
     if (!walletName.trim()) return;
     setIsSubmitting(true);
     try {
-      await walletService.createWallet({ name: walletName, chain: selectedChain });
+      await walletService.createWallet({ name: walletName, chain: chainId });
       setSuccess(t('wallets.createSuccess'));
       setShowCreateModal(false);
       setWalletName('');
-      setSelectedChain('ethereum');
       loadWallets();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create wallet');
@@ -103,13 +101,12 @@ export function Wallets() {
       await walletService.importWallet({
         name: walletName,
         private_key: privateKey,
-        chain: selectedChain,
+        chain: chainId,
       });
       setSuccess(t('wallets.importSuccess'));
       setShowImportModal(false);
       setWalletName('');
       setPrivateKey('');
-      setSelectedChain('ethereum');
       loadWallets();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to import wallet');
@@ -170,12 +167,26 @@ export function Wallets() {
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">{t('wallets.title')}</h1>
+        <div className="flex items-center">
+          <span
+            className="w-10 h-10 rounded-full flex items-center justify-center text-white text-xl mr-3"
+            style={{ backgroundColor: chain.color }}
+          >
+            {chain.icon}
+          </span>
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">
+              {chain.name} {t('wallets.title')}
+            </h1>
+            <p className="text-sm text-gray-500">{t('chains.manageWallets', { chain: chain.name })}</p>
+          </div>
+        </div>
         {isAdmin && (
           <div className="flex space-x-3">
             <button
               onClick={() => setShowCreateModal(true)}
-              className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+              className="flex items-center px-4 py-2 text-white rounded-lg hover:opacity-90"
+              style={{ backgroundColor: chain.color }}
             >
               <Plus className="w-4 h-4 mr-2" />
               {t('wallets.createWallet')}
@@ -223,9 +234,6 @@ export function Wallets() {
                       {t('common.active')}
                     </span>
                   )}
-                  <span className="ml-2 px-2 py-0.5 bg-gray-100 text-gray-600 text-xs rounded-full uppercase">
-                    {wallet.chain}
-                  </span>
                 </div>
 
                 <div className="mt-2 flex items-center">
@@ -244,7 +252,7 @@ export function Wallets() {
                   <div className="mt-3">
                     <p className="text-sm text-gray-500">{t('wallets.balance')}</p>
                     <p className="text-lg font-semibold">
-                      {parseFloat(balances[wallet.address].native_balance).toFixed(6)} {wallet.chain === 'zcash' ? 'ZEC' : 'ETH'}
+                      {parseFloat(balances[wallet.address].native_balance).toFixed(6)} {chain.symbol}
                     </p>
                     {balances[wallet.address].tokens.length > 0 && (
                       <div className="mt-1 flex flex-wrap gap-2">
@@ -318,9 +326,21 @@ export function Wallets() {
       <Modal
         isOpen={showCreateModal}
         onClose={() => setShowCreateModal(false)}
-        title={t('wallets.createWallet')}
+        title={`${t('wallets.createWallet')} - ${chain.name}`}
       >
         <div className="space-y-4">
+          <div className="flex items-center p-3 bg-gray-50 rounded-lg">
+            <span
+              className="w-8 h-8 rounded-full flex items-center justify-center text-white mr-3"
+              style={{ backgroundColor: chain.color }}
+            >
+              {chain.icon}
+            </span>
+            <div>
+              <p className="font-medium">{chain.name}</p>
+              <p className="text-sm text-gray-500">{t('chains.addressFormat')}: {chain.addressPrefix}...</p>
+            </div>
+          </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               {t('wallets.walletName')}
@@ -332,28 +352,6 @@ export function Wallets() {
               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
               placeholder={t('wallets.walletNamePlaceholder')}
             />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              {t('wallets.selectChain')}
-            </label>
-            <div className="grid grid-cols-2 gap-2">
-              {chainOptions.map((chain) => (
-                <button
-                  key={chain.id}
-                  type="button"
-                  onClick={() => setSelectedChain(chain.id)}
-                  className={`flex items-center justify-center px-3 py-2 border rounded-lg transition-colors ${
-                    selectedChain === chain.id
-                      ? 'border-blue-500 bg-blue-50 text-blue-700'
-                      : 'border-gray-300 hover:border-gray-400'
-                  }`}
-                >
-                  <span className="mr-2">{chain.icon}</span>
-                  <span>{chain.name}</span>
-                </button>
-              ))}
-            </div>
           </div>
           <div className="flex justify-end space-x-3">
             <button
@@ -365,7 +363,8 @@ export function Wallets() {
             <button
               onClick={handleCreate}
               disabled={isSubmitting || !walletName.trim()}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+              className="px-4 py-2 text-white rounded-lg hover:opacity-90 disabled:opacity-50"
+              style={{ backgroundColor: chain.color }}
             >
               {isSubmitting ? <LoadingSpinner size="sm" /> : t('wallets.create')}
             </button>
@@ -377,9 +376,21 @@ export function Wallets() {
       <Modal
         isOpen={showImportModal}
         onClose={() => setShowImportModal(false)}
-        title={t('wallets.importWallet')}
+        title={`${t('wallets.importWallet')} - ${chain.name}`}
       >
         <div className="space-y-4">
+          <div className="flex items-center p-3 bg-gray-50 rounded-lg">
+            <span
+              className="w-8 h-8 rounded-full flex items-center justify-center text-white mr-3"
+              style={{ backgroundColor: chain.color }}
+            >
+              {chain.icon}
+            </span>
+            <div>
+              <p className="font-medium">{chain.name}</p>
+              <p className="text-sm text-gray-500">{t('chains.addressFormat')}: {chain.addressPrefix}...</p>
+            </div>
+          </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               {t('wallets.walletName')}
@@ -394,28 +405,6 @@ export function Wallets() {
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              {t('wallets.selectChain')}
-            </label>
-            <div className="grid grid-cols-2 gap-2">
-              {chainOptions.map((chain) => (
-                <button
-                  key={chain.id}
-                  type="button"
-                  onClick={() => setSelectedChain(chain.id)}
-                  className={`flex items-center justify-center px-3 py-2 border rounded-lg transition-colors ${
-                    selectedChain === chain.id
-                      ? 'border-blue-500 bg-blue-50 text-blue-700'
-                      : 'border-gray-300 hover:border-gray-400'
-                  }`}
-                >
-                  <span className="mr-2">{chain.icon}</span>
-                  <span>{chain.name}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
               {t('wallets.privateKey')}
             </label>
             <input
@@ -423,7 +412,7 @@ export function Wallets() {
               value={privateKey}
               onChange={(e) => setPrivateKey(e.target.value)}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
-              placeholder={t('wallets.privateKeyPlaceholder')}
+              placeholder={chainId === 'ethereum' ? '0x...' : t('wallets.privateKeyPlaceholder')}
             />
           </div>
           <div className="flex justify-end space-x-3">
@@ -436,7 +425,8 @@ export function Wallets() {
             <button
               onClick={handleImport}
               disabled={isSubmitting || !walletName.trim() || !privateKey.trim()}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+              className="px-4 py-2 text-white rounded-lg hover:opacity-90 disabled:opacity-50"
+              style={{ backgroundColor: chain.color }}
             >
               {isSubmitting ? <LoadingSpinner size="sm" /> : t('wallets.import')}
             </button>

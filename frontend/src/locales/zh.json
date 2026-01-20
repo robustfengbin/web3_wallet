@@ -34,7 +34,10 @@
     "transfer": "转账",
     "history": "历史记录",
     "settings": "设置",
-    "loggedInAs": "当前登录"
+    "loggedInAs": "当前登录",
+    "chains": "区块链",
+    "general": "通用",
+    "rpcSettings": "RPC 设置"
   },
   "header": {
     "title": "以太坊钱包管理器",
@@ -77,7 +80,8 @@
     "exportKeyWarning": "警告：私钥可完全控制您的钱包。请勿与他人分享。",
     "exportKeyConfirm": "输入密码确认",
     "keepSecure": "请妥善保管私钥。任何拥有私钥的人都可以控制您的资金。",
-    "export": "导出"
+    "export": "导出",
+    "selectChain": "选择链"
   },
   "transfer": {
     "title": "转账",
