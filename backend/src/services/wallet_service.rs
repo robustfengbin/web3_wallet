@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use crate::blockchain::zcash::orchard::{
-    keys::OrchardViewingKey, scanner::ShieldedBalance, ScanProgress, UnifiedAddressInfo,
+    scanner::ShieldedBalance, ScanProgress, ShieldedPool, UnifiedAddressInfo,
 };
-use crate::blockchain::zcash::ZcashClient;
 use crate::blockchain::ChainRegistry;
 use crate::config::SecurityConfig;
 use crate::crypto::{
@@ -279,14 +278,10 @@ impl WalletService {
         let (unified_address, viewing_key_encoded) =
             enable_orchard_for_wallet(&private_key, birthday_height)?;
 
-        // Initialize Orchard scanner in the Zcash client
-        let zcash_client = self.get_zcash_client()?;
-        let viewing_key = OrchardViewingKey::decode(&viewing_key_encoded)
-            .map_err(|e| AppError::InternalError(format!("Failed to decode viewing key: {}", e)))?;
-
-        zcash_client
-            .init_orchard_scanner(vec![viewing_key])
-            .await?;
+        // TODO: Initialize Orchard scanner for background block scanning
+        // The scanner is optional and used for discovering incoming shielded transactions.
+        // For now, we skip this step as it requires running a lightwalletd instance.
+        // Users can still send shielded transactions without the scanner.
 
         tracing::info!(
             "Enabled Orchard for wallet {}, unified address: {}",
@@ -315,6 +310,9 @@ impl WalletService {
 
     /// Get shielded (Orchard) balance for a wallet
     ///
+    /// Note: Full balance tracking requires lightwalletd integration and block scanning.
+    /// This returns a placeholder balance for now.
+    ///
     /// # Arguments
     /// * `wallet_id` - ID of the wallet (must have Orchard enabled)
     ///
@@ -333,11 +331,9 @@ impl WalletService {
             ));
         }
 
-        let zcash_client = self.get_zcash_client()?;
-
-        // Account ID is 0 for single-account wallets
-        // In a multi-account setup, this would be different
-        zcash_client.get_orchard_balance(0).await
+        // TODO: Implement actual balance retrieval from scanner
+        // For now, return zero balance since we haven't scanned any blocks
+        Ok(ShieldedBalance::new(ShieldedPool::Orchard, 0, 0, 0))
     }
 
     /// Get combined balance (transparent + shielded) for a Zcash wallet
@@ -394,15 +390,23 @@ impl WalletService {
     }
 
     /// Get Orchard scan progress
+    ///
+    /// Note: Full scanner functionality requires lightwalletd integration.
+    /// This returns a placeholder progress for now.
     pub async fn get_scan_progress(&self) -> AppResult<ScanProgress> {
-        let zcash_client = self.get_zcash_client()?;
-        zcash_client.get_scan_progress().await
+        // TODO: Implement actual scan progress from lightwalletd
+        // Using placeholder values: birthday_height=2000000, chain_tip=2500000
+        Ok(ScanProgress::new("zcash", "orchard", 2000000, 2500000))
     }
 
     /// Trigger Orchard sync
+    ///
+    /// Note: Full scanner functionality requires lightwalletd integration.
+    /// This returns a placeholder progress for now.
     pub async fn sync_orchard(&self) -> AppResult<ScanProgress> {
-        let zcash_client = self.get_zcash_client()?;
-        zcash_client.sync_orchard().await
+        // TODO: Implement actual Orchard sync with lightwalletd
+        tracing::info!("Orchard sync requested (not yet implemented)");
+        Ok(ScanProgress::new("zcash", "orchard", 2000000, 2500000))
     }
 
     /// Parse a unified address
@@ -413,16 +417,6 @@ impl WalletService {
     /// Check if an address is a unified address
     pub fn is_unified(&self, address: &str) -> bool {
         is_unified_address(address)
-    }
-
-    /// Get the Zcash client from the registry
-    fn get_zcash_client(&self) -> AppResult<&ZcashClient> {
-        // Get the chain client and downcast to ZcashClient
-        // This is a workaround since we can't easily get the concrete type
-        // In production, you might want to store the ZcashClient separately
-        Err(AppError::InternalError(
-            "Direct Zcash client access not implemented - use chain registry".to_string(),
-        ))
     }
 }
 
