@@ -4,5 +4,5 @@ pub mod password;
 pub mod zcash;
 
 pub use encryption::{decrypt, encrypt};
-pub use ethereum::{generate_ethereum_wallet, import_ethereum_wallet, validate_ethereum_address};
-pub use zcash::{generate_zcash_wallet, import_zcash_wallet, validate_zcash_address};
+pub use ethereum::{generate_ethereum_wallet, import_ethereum_wallet};
+pub use zcash::{generate_zcash_wallet, import_zcash_wallet};

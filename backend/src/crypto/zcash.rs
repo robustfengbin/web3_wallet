@@ -31,28 +31,96 @@ pub fn generate_zcash_wallet() -> AppResult<(String, String)> {
 }
 
 /// Import a Zcash wallet from private key
+/// Supports both WIF format (starts with 5, K, L) and raw hex format
 /// Returns the address derived from the private key
-pub fn import_zcash_wallet(private_key_hex: &str) -> AppResult<String> {
+pub fn import_zcash_wallet(private_key: &str) -> AppResult<String> {
+    tracing::debug!("Importing Zcash wallet, key length: {}, first char: {:?}",
+        private_key.len(),
+        private_key.chars().next()
+    );
+
     let secp = Secp256k1::new();
 
-    // Parse private key
-    let key_hex = private_key_hex.strip_prefix("0x").unwrap_or(private_key_hex);
-    let key_bytes = hex::decode(key_hex)
-        .map_err(|e| AppError::ValidationError(format!("Invalid private key hex: {}", e)))?;
+    // Determine key format and parse
+    let key_bytes = if private_key.starts_with('5') || private_key.starts_with('K') || private_key.starts_with('L') {
+        // WIF format
+        tracing::debug!("Detected WIF format private key");
+        decode_wif_private_key(private_key)?
+    } else {
+        // Hex format
+        tracing::debug!("Detected hex format private key");
+        let key_hex = private_key.strip_prefix("0x").unwrap_or(private_key);
+        hex::decode(key_hex)
+            .map_err(|e| {
+                tracing::error!("Failed to decode hex private key: {}", e);
+                AppError::ValidationError(format!("Invalid private key hex: {}", e))
+            })?
+    };
+
+    tracing::debug!("Parsed key bytes length: {}", key_bytes.len());
 
     if key_bytes.len() != 32 {
-        return Err(AppError::ValidationError(
-            "Private key must be 32 bytes".to_string(),
-        ));
+        tracing::error!("Invalid key length: {} bytes", key_bytes.len());
+        return Err(AppError::ValidationError(format!(
+            "Private key must be 32 bytes, got {} bytes",
+            key_bytes.len()
+        )));
     }
 
     let secret_key = SecretKey::from_slice(&key_bytes)
-        .map_err(|e| AppError::ValidationError(format!("Invalid private key: {}", e)))?;
+        .map_err(|e| {
+            tracing::error!("Failed to create secret key: {}", e);
+            AppError::ValidationError(format!("Invalid private key: {}", e))
+        })?;
 
     let public_key = PublicKey::from_secret_key(&secp, &secret_key);
 
     // Generate address from public key
-    public_key_to_t_address(&public_key)
+    let address = public_key_to_t_address(&public_key)?;
+    tracing::info!("Successfully derived Zcash address: {}", address);
+    Ok(address)
+}
+
+/// Decode a WIF (Wallet Import Format) private key
+/// WIF format: Base58Check(prefix + privkey + [compression flag] + checksum)
+fn decode_wif_private_key(wif: &str) -> AppResult<Vec<u8>> {
+    let decoded = bs58::decode(wif)
+        .into_vec()
+        .map_err(|e| AppError::ValidationError(format!("Invalid WIF format: {}", e)))?;
+
+    // WIF uncompressed: 1 byte prefix + 32 bytes key + 4 bytes checksum = 37 bytes
+    // WIF compressed: 1 byte prefix + 32 bytes key + 1 byte flag + 4 bytes checksum = 38 bytes
+    if decoded.len() != 37 && decoded.len() != 38 {
+        return Err(AppError::ValidationError(format!(
+            "Invalid WIF length: expected 37 or 38 bytes, got {}",
+            decoded.len()
+        )));
+    }
+
+    // Verify checksum
+    let payload_len = decoded.len() - 4;
+    let payload = &decoded[..payload_len];
+    let checksum = &decoded[payload_len..];
+
+    let hash1 = Sha256::digest(payload);
+    let hash2 = Sha256::digest(&hash1);
+
+    if &hash2[..4] != checksum {
+        return Err(AppError::ValidationError("WIF checksum mismatch".to_string()));
+    }
+
+    // Extract private key (skip prefix byte)
+    // For mainnet: prefix is 0x80
+    // For Zcash mainnet: prefix is also 0x80
+    if payload[0] != 0x80 {
+        return Err(AppError::ValidationError(format!(
+            "Invalid WIF prefix: expected 0x80, got 0x{:02x}",
+            payload[0]
+        )));
+    }
+
+    // Return the 32-byte private key
+    Ok(payload[1..33].to_vec())
 }
 
 /// Convert a secp256k1 public key to a Zcash transparent address (t-address)
@@ -89,7 +157,8 @@ fn public_key_to_t_address(public_key: &PublicKey) -> AppResult<String> {
 }
 
 /// Validate a Zcash address format
-pub fn validate_zcash_address(address: &str) -> bool {
+#[allow(dead_code)]
+pub(crate) fn validate_zcash_address(address: &str) -> bool {
     if address.is_empty() {
         return false;
     }

@@ -147,12 +147,16 @@
     "rpc": {
       "title": "RPC Node Configuration",
       "description": "Select or configure Ethereum RPC node. Paid services (Alchemy, Infura) are recommended for better performance and reliability.",
+      "zcashDescription": "Configure Zcash RPC node. Local node requires running zcashd with RPC enabled.",
       "selectProvider": "Select Provider",
       "requiresApiKey": "Requires API Key",
       "custom": "Custom Node",
       "apiKeyPlaceholder": "Enter your API Key",
       "customUrl": "Custom RPC URL",
       "currentUrl": "Current RPC URL",
+      "rpcUser": "RPC Username",
+      "rpcPassword": "RPC Password",
+      "optional": "Optional",
       "test": "Test Connection",
       "save": "Save Configuration",
       "testSuccess": "Connection successful",
@@ -162,7 +166,13 @@
       "saved": "Configuration saved and applied immediately.",
       "urlRequired": "Please enter RPC URL",
       "restartNote": "Configuration will be applied immediately without restart"
-    }
+    },
+    "adminOnly": "Only administrators can modify this setting"
+  },
+  "chains": {
+    "configureRpc": "Configure RPC connection for {{chain}}",
+    "manageWallets": "Manage {{chain}} wallets",
+    "transfer": "{{chain}} transfer"
   },
   "status": {
     "pending": "Pending",

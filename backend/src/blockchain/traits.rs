@@ -85,4 +85,10 @@ pub trait ChainClient: Send + Sync {
 
     /// Get current gas price in Gwei
     async fn get_gas_price(&self) -> AppResult<Decimal>;
+
+    /// Import address for tracking (used by UTXO-based chains like Zcash)
+    /// Default implementation does nothing (not needed for account-based chains like Ethereum)
+    async fn import_address_for_tracking(&self, _address: &str, _label: &str) -> AppResult<()> {
+        Ok(())
+    }
 }

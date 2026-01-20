@@ -25,7 +25,8 @@ pub fn import_ethereum_wallet(private_key_hex: &str) -> AppResult<String> {
 }
 
 /// Validate an Ethereum address format
-pub fn validate_ethereum_address(address: &str) -> bool {
+#[allow(dead_code)]
+pub(crate) fn validate_ethereum_address(address: &str) -> bool {
     if address.is_empty() {
         return false;
     }

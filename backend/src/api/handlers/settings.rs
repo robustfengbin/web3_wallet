@@ -190,6 +190,12 @@ pub async fn update_rpc_config(
 #[derive(Debug, Deserialize)]
 pub struct TestRpcRequest {
     pub rpc_url: String,
+    #[serde(default)]
+    pub chain: Option<String>,
+    #[serde(default)]
+    pub rpc_user: Option<String>,
+    #[serde(default)]
+    pub rpc_password: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -200,27 +206,19 @@ pub struct TestRpcResponse {
     pub error: Option<String>,
 }
 
-/// Test an RPC endpoint
+/// Test an RPC endpoint - supports multiple chains
 pub async fn test_rpc_endpoint(
     request: web::Json<TestRpcRequest>,
 ) -> AppResult<HttpResponse> {
-    use ethers::prelude::*;
     use std::time::Instant;
 
     let start = Instant::now();
+    let chain = request.chain.as_deref().unwrap_or("ethereum");
 
-    let result = async {
-        let provider = Provider::<Http>::try_from(&request.rpc_url)
-            .map_err(|e| format!("Failed to create provider: {}", e))?;
-
-        let block_number = provider
-            .get_block_number()
-            .await
-            .map_err(|e| format!("Failed to get block number: {}", e))?;
-
-        Ok::<u64, String>(block_number.as_u64())
-    }
-    .await;
+    let result = match chain {
+        "zcash" => test_zcash_rpc(&request.rpc_url, request.rpc_user.as_deref(), request.rpc_password.as_deref()).await,
+        _ => test_ethereum_rpc(&request.rpc_url).await,
+    };
 
     let latency_ms = start.elapsed().as_millis() as u64;
 
@@ -240,4 +238,74 @@ pub async fn test_rpc_endpoint(
     };
 
     Ok(HttpResponse::Ok().json(response))
+}
+
+/// Test Ethereum RPC endpoint
+async fn test_ethereum_rpc(rpc_url: &str) -> Result<u64, String> {
+    use ethers::prelude::*;
+
+    let provider = Provider::<Http>::try_from(rpc_url)
+        .map_err(|e| format!("Failed to create provider: {}", e))?;
+
+    let block_number = provider
+        .get_block_number()
+        .await
+        .map_err(|e| format!("Failed to get block number: {}", e))?;
+
+    Ok(block_number.as_u64())
+}
+
+/// Test Zcash RPC endpoint
+async fn test_zcash_rpc(rpc_url: &str, rpc_user: Option<&str>, rpc_password: Option<&str>) -> Result<u64, String> {
+    use reqwest::Client;
+    use serde_json::json;
+
+    let client = Client::new();
+
+    let request_body = json!({
+        "jsonrpc": "1.0",
+        "id": "test",
+        "method": "getblockchaininfo",
+        "params": []
+    });
+
+    let mut request = client.post(rpc_url)
+        .header("Content-Type", "application/json")
+        .json(&request_body);
+
+    // Add basic auth if credentials provided
+    if let (Some(user), Some(pass)) = (rpc_user, rpc_password) {
+        if !user.is_empty() {
+            request = request.basic_auth(user, Some(pass));
+        }
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("Failed to connect: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("HTTP error: {}", response.status()));
+    }
+
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    if let Some(error) = json.get("error").and_then(|e| e.as_object()) {
+        if !error.is_empty() && json.get("error") != Some(&serde_json::Value::Null) {
+            let message = error.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown error");
+            return Err(format!("RPC error: {}", message));
+        }
+    }
+
+    let blocks = json
+        .get("result")
+        .and_then(|r| r.get("blocks"))
+        .and_then(|b| b.as_u64())
+        .ok_or_else(|| "Failed to get block height from response".to_string())?;
+
+    Ok(blocks)
 }

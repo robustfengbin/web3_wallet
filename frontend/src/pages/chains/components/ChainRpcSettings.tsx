@@ -109,7 +109,12 @@ export function ChainRpcSettings({ chainId }: ChainRpcSettingsProps) {
     setRpcError('');
 
     try {
-      const result = await settingsService.testRpcEndpoint(rpcUrl);
+      const result = await settingsService.testRpcEndpoint(
+        rpcUrl,
+        chainId,
+        rpcUser || undefined,
+        rpcPassword || undefined
+      );
       setTestResult(result);
     } catch (err) {
       setRpcError(err instanceof Error ? err.message : 'Test failed');

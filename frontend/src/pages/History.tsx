@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { Card, LoadingSpinner, StatusBadge } from '../components/Common';
 import { transferService } from '../services/api';
 import { TransferListResponse } from '../types';
+import { getChain } from '../config/chains';
 
 export function History() {
   const { t } = useTranslation();
@@ -32,8 +33,35 @@ export function History() {
     return new Date(dateStr).toLocaleString();
   };
 
-  const getEtherscanUrl = (txHash: string) => {
-    return `https://etherscan.io/tx/${txHash}`;
+  // Format amount based on chain decimals
+  const formatAmount = (amount: string, chainId: string) => {
+    const num = parseFloat(amount);
+    if (isNaN(num)) return amount;
+    // Use reasonable precision based on chain
+    const chain = getChain(chainId);
+    const decimals = chain?.tokens[0]?.decimals || 18;
+    // Show at most 8 decimal places, but trim trailing zeros
+    const maxDecimals = Math.min(decimals, 8);
+    return num.toFixed(maxDecimals).replace(/\.?0+$/, '');
+  };
+
+  // Get explorer URL for transaction based on chain
+  const getExplorerUrl = (txHash: string, chainId: string) => {
+    const chain = getChain(chainId);
+    if (!chain?.explorerUrl) {
+      return `https://etherscan.io/tx/${txHash}`;
+    }
+    // Different explorers use different URL patterns
+    if (chainId === 'zcash') {
+      return `${chain.explorerUrl}/transactions/${txHash}`;
+    }
+    return `${chain.explorerUrl}/tx/${txHash}`;
+  };
+
+  // Get chain display name
+  const getChainName = (chainId: string) => {
+    const chain = getChain(chainId);
+    return chain?.name || chainId.toUpperCase();
   };
 
   const totalPages = transfers ? Math.ceil(transfers.total / limit) : 0;
@@ -90,16 +118,16 @@ export function History() {
                         {transfer.to_address.slice(-6)}
                       </td>
                       <td className="py-4 font-medium">
-                        {transfer.amount} {transfer.token}
+                        {formatAmount(transfer.amount, transfer.chain)} {transfer.token}
                       </td>
-                      <td className="py-4 text-sm uppercase">{transfer.chain}</td>
+                      <td className="py-4 text-sm">{getChainName(transfer.chain)}</td>
                       <td className="py-4">
                         <StatusBadge status={transfer.status} />
                       </td>
                       <td className="py-4">
                         {transfer.tx_hash ? (
                           <a
-                            href={getEtherscanUrl(transfer.tx_hash)}
+                            href={getExplorerUrl(transfer.tx_hash, transfer.chain)}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="flex items-center text-blue-600 hover:text-blue-800 text-sm"

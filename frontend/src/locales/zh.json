@@ -147,12 +147,16 @@
     "rpc": {
       "title": "RPC 节点配置",
       "description": "选择或配置以太坊 RPC 节点。推荐使用付费服务（如 Alchemy、Infura）以获得更好的性能和稳定性。",
+      "zcashDescription": "配置 Zcash RPC 节点。本地节点需要运行 zcashd 并开启 RPC 服务。",
       "selectProvider": "选择节点服务商",
       "requiresApiKey": "需要 API Key",
       "custom": "自定义节点",
       "apiKeyPlaceholder": "输入您的 API Key",
       "customUrl": "自定义 RPC URL",
       "currentUrl": "当前 RPC URL",
+      "rpcUser": "RPC 用户名",
+      "rpcPassword": "RPC 密码",
+      "optional": "可选",
       "test": "测试连接",
       "save": "保存配置",
       "testSuccess": "连接成功",
@@ -162,7 +166,13 @@
       "saved": "配置已保存并立即生效",
       "urlRequired": "请输入 RPC URL",
       "restartNote": "配置将立即生效，无需重启服务"
-    }
+    },
+    "adminOnly": "只有管理员可以修改此设置"
+  },
+  "chains": {
+    "configureRpc": "配置 {{chain}} 的 RPC 节点连接",
+    "manageWallets": "管理 {{chain}} 钱包",
+    "transfer": "{{chain}} 转账"
   },
   "status": {
     "pending": "待处理",

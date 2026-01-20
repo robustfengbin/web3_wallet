@@ -33,7 +33,7 @@ export const settingsService = {
     return api.put('/settings/rpc', config);
   },
 
-  testRpcEndpoint: (rpc_url: string): Promise<TestRpcResponse> => {
-    return api.post('/settings/rpc/test', { rpc_url });
+  testRpcEndpoint: (rpc_url: string, chain?: string, rpc_user?: string, rpc_password?: string): Promise<TestRpcResponse> => {
+    return api.post('/settings/rpc/test', { rpc_url, chain, rpc_user, rpc_password });
   },
 };

@@ -45,7 +45,7 @@ export const CHAINS: Record<string, ChainConfig> = {
     icon: 'Ⓩ',
     color: '#F4B728',
     addressPrefix: 't1',
-    explorerUrl: 'https://explorer.zcha.in',
+    explorerUrl: 'https://mainnet.zcashexplorer.app',
     tokens: [
       { symbol: 'ZEC', name: 'Zcash', icon: 'Ⓩ', color: '#F4B728', decimals: 8 },
     ],

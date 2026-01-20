@@ -73,6 +73,13 @@ bs58 = "0.5"
 sha2 = "0.10"
 ripemd = "0.1"
 
+# BLAKE2b for Zcash transaction hashing (ZIP 244)
+blake2b_simd = "1.0"
+
+# Zcash transaction primitives for proper sighash calculation
+zcash_primitives = "0.20"
+zcash_protocol = "0.4"
+
 # secp256k1 for key operations
 secp256k1 = { version = "0.28", features = ["rand"] }
 
@@ -81,3 +88,8 @@ once_cell = "1.19"
 
 [dev-dependencies]
 actix-rt = "2"
+dotenv = "0.15"
+
+[[example]]
+name = "backup_wallets"
+path = "examples/backup_wallets.rs"

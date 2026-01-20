@@ -58,6 +58,13 @@ impl WalletService {
             .create(name, &address, &encrypted_key, chain)
             .await?;
 
+        // Import address into chain node for tracking (needed for UTXO-based chains like Zcash)
+        let chain_client = self.chain_registry.get(chain)?;
+        if let Err(e) = chain_client.import_address_for_tracking(&address, name).await {
+            tracing::warn!("Failed to import address for tracking: {}", e);
+            // Don't fail wallet creation, just warn
+        }
+
         let wallet = self
             .wallet_repo
             .find_by_id(id)
@@ -101,6 +108,13 @@ impl WalletService {
             .wallet_repo
             .create(name, &address, &encrypted_key, chain)
             .await?;
+
+        // Import address into chain node for tracking (needed for UTXO-based chains like Zcash)
+        let chain_client = self.chain_registry.get(chain)?;
+        if let Err(e) = chain_client.import_address_for_tracking(&address, name).await {
+            tracing::warn!("Failed to import address for tracking: {}", e);
+            // Don't fail wallet import, just warn
+        }
 
         let wallet = self
             .wallet_repo
