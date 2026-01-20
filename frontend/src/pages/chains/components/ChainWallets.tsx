@@ -169,12 +169,19 @@ export function ChainWallets({ chainId }: ChainWalletsProps) {
         wallet_id: walletId,
         birthday_height: 2000000, // TODO: Get current block height
       });
-      setUnifiedAddresses((prev) => ({
-        ...prev,
-        [walletId]: response.unified_address,
-      }));
-      setSuccess(t('zcash.orchard.enableSuccess', 'Privacy address generated successfully!'));
+      console.log('Orchard enable response:', response);
+      if (response && response.unified_address && response.unified_address.address) {
+        setUnifiedAddresses((prev) => ({
+          ...prev,
+          [walletId]: response.unified_address,
+        }));
+        setSuccess(t('zcash.orchard.enableSuccess', 'Privacy address generated successfully!'));
+      } else {
+        console.error('Invalid response structure:', response);
+        setError('Unexpected response format from server');
+      }
     } catch (err: any) {
+      console.error('Error generating privacy address:', err);
       setError(err.response?.data?.message || err.message || 'Failed to generate privacy address');
     } finally {
       setGeneratingPrivacyAddress(null);
@@ -280,7 +287,7 @@ export function ChainWallets({ chainId }: ChainWalletsProps) {
                 {/* Zcash Privacy Address Section */}
                 {chainId === 'zcash' && (
                   <div className="mt-3">
-                    {unifiedAddresses[wallet.id] ? (
+                    {unifiedAddresses[wallet.id]?.address ? (
                       // Show unified address if already generated
                       <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
                         <div className="flex items-center gap-2 mb-2">
@@ -294,7 +301,7 @@ export function ChainWallets({ chainId }: ChainWalletsProps) {
                             {unifiedAddresses[wallet.id].address.slice(0, 30)}...
                           </code>
                           <button
-                            onClick={() => copyToClipboard(unifiedAddresses[wallet.id].address)}
+                            onClick={() => copyToClipboard(unifiedAddresses[wallet.id]?.address || '')}
                             className="ml-2 text-green-600 hover:text-green-800"
                             title={t('common.copy')}
                           >
