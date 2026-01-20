@@ -91,4 +91,18 @@ pub trait ChainClient: Send + Sync {
     async fn import_address_for_tracking(&self, _address: &str, _label: &str) -> AppResult<()> {
         Ok(())
     }
+
+    /// Get current block height
+    /// Default implementation returns 0 (should be overridden for chains that need this)
+    async fn get_block_height(&self) -> AppResult<u64> {
+        Ok(0)
+    }
+
+    /// Broadcast a raw signed transaction
+    /// Default implementation returns an error (should be overridden for chains that support this)
+    async fn broadcast_raw_transaction(&self, _raw_tx_hex: &str) -> AppResult<String> {
+        Err(crate::error::AppError::NotImplemented(
+            "Raw transaction broadcast not supported for this chain".to_string(),
+        ))
+    }
 }

@@ -47,7 +47,7 @@ function ChainSection({ chain, isExpanded }: ChainSectionProps) {
           >
             {chain.icon}
           </span>
-          {chain.name}
+          <span>{chain.name}</span>
         </div>
         {isExpanded ? (
           <ChevronDown className="w-4 h-4" />
@@ -57,45 +57,45 @@ function ChainSection({ chain, isExpanded }: ChainSectionProps) {
       </NavLink>
 
       {isExpanded && (
-        <div className="bg-gray-950 w-full">
+        <div className="bg-gray-950">
           <NavLink
             to={`${basePath}/wallets`}
             className={({ isActive }) =>
-              `flex items-center pl-12 pr-6 py-2 text-sm transition-colors ${
+              `flex items-center px-6 pl-12 py-2 text-sm transition-colors ${
                 isActive
                   ? 'text-white bg-blue-600'
                   : 'text-gray-400 hover:bg-gray-800 hover:text-white'
               }`
             }
           >
-            <Wallet className="w-4 h-4 mr-3" />
-            {t('sidebar.wallets')}
+            <Wallet className="w-4 h-4 mr-3 flex-shrink-0" />
+            <span>{t('sidebar.wallets')}</span>
           </NavLink>
           <NavLink
             to={`${basePath}/transfer`}
             className={({ isActive }) =>
-              `flex items-center pl-12 pr-6 py-2 text-sm transition-colors ${
+              `flex items-center px-6 pl-12 py-2 text-sm transition-colors ${
                 isActive
                   ? 'text-white bg-blue-600'
                   : 'text-gray-400 hover:bg-gray-800 hover:text-white'
               }`
             }
           >
-            <ArrowLeftRight className="w-4 h-4 mr-3" />
-            {t('sidebar.transfer')}
+            <ArrowLeftRight className="w-4 h-4 mr-3 flex-shrink-0" />
+            <span>{t('sidebar.transfer')}</span>
           </NavLink>
           <NavLink
             to={`${basePath}/rpc`}
             className={({ isActive }) =>
-              `flex items-center pl-12 pr-6 py-2 text-sm transition-colors ${
+              `flex items-center px-6 pl-12 py-2 text-sm transition-colors ${
                 isActive
                   ? 'text-white bg-blue-600'
                   : 'text-gray-400 hover:bg-gray-800 hover:text-white'
               }`
             }
           >
-            <Server className="w-4 h-4 mr-3" />
-            {t('sidebar.rpcSettings')}
+            <Server className="w-4 h-4 mr-3 flex-shrink-0" />
+            <span>{t('sidebar.rpcSettings')}</span>
           </NavLink>
         </div>
       )}
@@ -109,13 +109,15 @@ export function Sidebar() {
   const location = useLocation();
 
   return (
-    <aside className="w-64 bg-gray-900 text-white min-h-screen overflow-hidden">
+    <aside className="w-64 min-w-[256px] bg-gray-900 text-white flex flex-col h-screen">
+      {/* Header */}
       <div className="p-6">
         <h1 className="text-xl font-bold">{t('sidebar.title')}</h1>
         <p className="text-gray-400 text-sm mt-1">{t('sidebar.subtitle')}</p>
       </div>
 
-      <nav className="mt-2">
+      {/* Navigation */}
+      <nav className="flex-1 overflow-y-auto">
         {/* Dashboard */}
         <NavLink
           to="/"
@@ -128,8 +130,8 @@ export function Sidebar() {
             }`
           }
         >
-          <LayoutDashboard className="w-5 h-5 mr-3" />
-          {t('sidebar.dashboard')}
+          <LayoutDashboard className="w-5 h-5 mr-3 flex-shrink-0" />
+          <span>{t('sidebar.dashboard')}</span>
         </NavLink>
 
         {/* Chain Sections */}
@@ -162,8 +164,8 @@ export function Sidebar() {
               }`
             }
           >
-            <History className="w-5 h-5 mr-3" />
-            {t('sidebar.history')}
+            <History className="w-5 h-5 mr-3 flex-shrink-0" />
+            <span>{t('sidebar.history')}</span>
           </NavLink>
           <NavLink
             to="/settings"
@@ -175,13 +177,14 @@ export function Sidebar() {
               }`
             }
           >
-            <Settings className="w-5 h-5 mr-3" />
-            {t('sidebar.settings')}
+            <Settings className="w-5 h-5 mr-3 flex-shrink-0" />
+            <span>{t('sidebar.settings')}</span>
           </NavLink>
         </div>
       </nav>
 
-      <div className="absolute bottom-0 left-0 w-64 p-6 border-t border-gray-700">
+      {/* User Info at bottom */}
+      <div className="p-6 border-t border-gray-700">
         <div className="text-sm">
           <p className="text-gray-400">{t('sidebar.loggedInAs')}</p>
           <p className="font-medium">{user?.username}</p>

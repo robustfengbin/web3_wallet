@@ -240,11 +240,23 @@
       "sendPrivateButton": "Send Private Transfer",
       "sending": "Sending...",
       "transferSuccess": "Shielded transfer submitted successfully!",
+      "fundSource": "Fund Source",
+      "fundAuto": "Auto",
+      "fundShielded": "Shielded",
+      "fundTransparent": "Transparent",
+      "fundAutoDesc": "Use shielded balance first, then transparent",
+      "fundShieldedDesc": "Maximum privacy - use only shielded balance",
+      "fundTransparentDesc": "Shielding operation - converts transparent to shielded",
+      "availableSource": "Available: {{amount}} ZEC",
+      "transparentOnly": "transparent",
+      "shieldedOnly": "shielded",
+      "total": "total",
       "errors": {
         "addressRequired": "Recipient address is required",
         "invalidAddress": "Please enter a valid unified address (u1...)",
         "amountRequired": "Please enter a valid amount",
-        "insufficientBalance": "Insufficient shielded balance"
+        "insufficientBalance": "Insufficient shielded balance",
+        "insufficientSourceBalance": "Insufficient {{source}} balance"
       }
     }
   }

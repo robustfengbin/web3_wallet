@@ -68,6 +68,24 @@ pub struct ScanProgressResponse {
     pub notes_found: u64,
 }
 
+/// Fund source for transfers
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FundSource {
+    /// Automatically use shielded first, then transparent
+    Auto,
+    /// Only use shielded (Orchard) balance
+    Shielded,
+    /// Only use transparent balance (shielding operation)
+    Transparent,
+}
+
+impl Default for FundSource {
+    fn default() -> Self {
+        FundSource::Auto
+    }
+}
+
 /// Orchard transfer request
 #[derive(Debug, Deserialize)]
 pub struct OrchardTransferRequest {
@@ -77,6 +95,8 @@ pub struct OrchardTransferRequest {
     pub amount_zatoshis: Option<u64>,
     pub memo: Option<String>,
     pub target_pool: Option<String>,
+    #[serde(default)]
+    pub fund_source: FundSource,
 }
 
 /// Orchard transfer response
@@ -85,6 +105,31 @@ pub struct OrchardTransferResponse {
     pub transfer_id: i64,
     pub status: String,
     pub tx_hash: Option<String>,
+}
+
+/// Get all unified addresses for a wallet
+pub async fn get_unified_addresses(
+    wallet_service: web::Data<Arc<WalletService>>,
+    path: web::Path<i32>,
+) -> AppResult<HttpResponse> {
+    let wallet_id = path.into_inner();
+
+    let addresses = wallet_service.get_unified_addresses(wallet_id).await?;
+
+    let response: Vec<UnifiedAddressInfo> = addresses
+        .into_iter()
+        .map(|addr| UnifiedAddressInfo {
+            address: addr.address,
+            has_orchard: addr.has_orchard,
+            has_sapling: addr.has_sapling,
+            has_transparent: addr.has_transparent,
+            transparent_address: addr.transparent_address,
+            address_index: addr.address_index,
+            account_index: addr.account_index,
+        })
+        .collect();
+
+    Ok(HttpResponse::Ok().json(response))
 }
 
 /// Enable Orchard for a Zcash wallet
@@ -209,9 +254,24 @@ pub async fn sync_orchard(
     Ok(HttpResponse::Ok().json(response))
 }
 
+/// Transfer proposal response
+#[derive(Debug, Serialize)]
+pub struct TransferProposalResponse {
+    pub proposal_id: String,
+    pub amount_zatoshis: u64,
+    pub amount_zec: f64,
+    pub fee_zatoshis: u64,
+    pub fee_zec: f64,
+    pub fund_source: String,
+    pub is_shielding: bool,
+    pub to_address: String,
+    pub memo: Option<String>,
+    pub expiry_height: u64,
+}
+
 /// Initiate an Orchard transfer
 pub async fn initiate_orchard_transfer(
-    _wallet_service: web::Data<Arc<WalletService>>,
+    wallet_service: web::Data<Arc<WalletService>>,
     user: AuthenticatedUser,
     request: web::Json<OrchardTransferRequest>,
 ) -> AppResult<HttpResponse> {
@@ -219,45 +279,135 @@ pub async fn initiate_orchard_transfer(
         return Err(AppError::Forbidden("Only admin can initiate transfers".to_string()));
     }
 
-    // TODO: Implement actual transfer initiation
-    // For now, return a mock response
-    let response = OrchardTransferResponse {
-        transfer_id: 1,
-        status: "pending".to_string(),
-        tx_hash: None,
+    // Convert fund source
+    let fund_source = match request.fund_source {
+        FundSource::Auto => crate::blockchain::zcash::orchard::transfer::FundSource::Auto,
+        FundSource::Shielded => crate::blockchain::zcash::orchard::transfer::FundSource::Shielded,
+        FundSource::Transparent => crate::blockchain::zcash::orchard::transfer::FundSource::Transparent,
     };
 
+    // Create transfer proposal
+    let proposal = wallet_service
+        .create_privacy_transfer_proposal(
+            request.wallet_id,
+            &request.to_address,
+            &request.amount,
+            request.memo.clone(),
+            fund_source,
+        )
+        .await?;
+
     tracing::info!(
-        "Orchard transfer initiated: wallet={}, to={}, amount={}",
+        "Orchard transfer proposal created: wallet={}, to={}, amount={} ZEC, fee={} zatoshis",
         request.wallet_id,
         request.to_address,
-        request.amount
+        request.amount,
+        proposal.fee_zatoshis
     );
+
+    let response = TransferProposalResponse {
+        proposal_id: proposal.proposal_id.clone(),
+        amount_zatoshis: proposal.amount_zatoshis,
+        amount_zec: proposal.amount_zatoshis as f64 / 100_000_000.0,
+        fee_zatoshis: proposal.fee_zatoshis,
+        fee_zec: proposal.fee_zatoshis as f64 / 100_000_000.0,
+        fund_source: format!("{:?}", proposal.fund_source).to_lowercase(),
+        is_shielding: proposal.is_shielding,
+        to_address: proposal.to_address.clone(),
+        memo: proposal.memo.clone(),
+        expiry_height: proposal.expiry_height,
+    };
 
     Ok(HttpResponse::Ok().json(response))
 }
 
+/// Execute transfer request
+#[derive(Debug, Deserialize)]
+pub struct ExecuteTransferRequest {
+    pub wallet_id: i32,
+    pub proposal_id: String,
+    pub amount_zatoshis: u64,
+    pub fee_zatoshis: u64,
+    pub to_address: String,
+    pub memo: Option<String>,
+    pub fund_source: String,
+    pub is_shielding: bool,
+    pub expiry_height: u64,
+}
+
+/// Execute transfer response
+#[derive(Debug, Serialize)]
+pub struct ExecuteTransferResponse {
+    pub tx_id: String,
+    pub status: String,
+    pub raw_tx: Option<String>,
+    pub amount_zatoshis: u64,
+    pub fee_zatoshis: u64,
+}
+
 /// Execute a pending Orchard transfer
 pub async fn execute_orchard_transfer(
-    _wallet_service: web::Data<Arc<WalletService>>,
+    wallet_service: web::Data<Arc<WalletService>>,
     user: AuthenticatedUser,
-    path: web::Path<i64>,
+    path: web::Path<String>,
+    request: Option<web::Json<ExecuteTransferRequest>>,
 ) -> AppResult<HttpResponse> {
     if user.role != "admin" {
         return Err(AppError::Forbidden("Only admin can execute transfers".to_string()));
     }
 
-    let transfer_id = path.into_inner();
+    let proposal_id = path.into_inner();
 
-    // TODO: Implement actual transfer execution
-    // For now, return a mock response
-    let response = OrchardTransferResponse {
-        transfer_id,
-        status: "submitted".to_string(),
-        tx_hash: Some("mock_tx_hash_placeholder".to_string()),
+    // Get the request body
+    let req = request.ok_or_else(|| {
+        AppError::ValidationError("Request body required for execute".to_string())
+    })?;
+
+    // Validate proposal ID matches
+    if req.proposal_id != proposal_id {
+        return Err(AppError::ValidationError(
+            "Proposal ID mismatch".to_string(),
+        ));
+    }
+
+    // Convert fund source
+    let fund_source = match req.fund_source.as_str() {
+        "shielded" => crate::blockchain::zcash::orchard::transfer::FundSource::Shielded,
+        "transparent" => crate::blockchain::zcash::orchard::transfer::FundSource::Transparent,
+        _ => crate::blockchain::zcash::orchard::transfer::FundSource::Auto,
     };
 
-    tracing::info!("Orchard transfer executed: id={}", transfer_id);
+    // Reconstruct proposal
+    let proposal = crate::blockchain::zcash::orchard::transfer::TransferProposal {
+        proposal_id: req.proposal_id.clone(),
+        amount_zatoshis: req.amount_zatoshis,
+        fee_zatoshis: req.fee_zatoshis,
+        fund_source,
+        is_shielding: req.is_shielding,
+        to_address: req.to_address.clone(),
+        memo: req.memo.clone(),
+        expiry_height: req.expiry_height,
+    };
+
+    // Execute the transfer
+    let result = wallet_service
+        .execute_privacy_transfer(req.wallet_id, &proposal)
+        .await?;
+
+    tracing::info!(
+        "Orchard transfer executed: proposal={}, tx_id={}, status={:?}",
+        proposal_id,
+        result.tx_id,
+        result.status
+    );
+
+    let response = ExecuteTransferResponse {
+        tx_id: result.tx_id,
+        status: format!("{:?}", result.status).to_lowercase(),
+        raw_tx: result.raw_tx,
+        amount_zatoshis: result.amount_zatoshis,
+        fee_zatoshis: result.fee_zatoshis,
+    };
 
     Ok(HttpResponse::Ok().json(response))
 }

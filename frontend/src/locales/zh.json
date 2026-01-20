@@ -240,11 +240,23 @@
       "sendPrivateButton": "发送隐私转账",
       "sending": "发送中...",
       "transferSuccess": "隐私转账已成功提交！",
+      "fundSource": "资金来源",
+      "fundAuto": "自动",
+      "fundShielded": "隐私余额",
+      "fundTransparent": "透明余额",
+      "fundAutoDesc": "优先使用隐私余额，不足时使用透明余额",
+      "fundShieldedDesc": "最高隐私 - 仅使用隐私余额",
+      "fundTransparentDesc": "隐蔽操作 - 将透明余额转为隐私余额",
+      "availableSource": "可用: {{amount}} ZEC",
+      "transparentOnly": "透明",
+      "shieldedOnly": "隐私",
+      "total": "总计",
       "errors": {
         "addressRequired": "请输入接收地址",
         "invalidAddress": "请输入有效的统一地址 (u1...)",
         "amountRequired": "请输入有效金额",
-        "insufficientBalance": "隐私余额不足"
+        "insufficientBalance": "隐私余额不足",
+        "insufficientSourceBalance": "{{source}}余额不足"
       }
     }
   }

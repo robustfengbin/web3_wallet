@@ -7,11 +7,16 @@ pub mod address;
 pub mod builder;
 pub mod keys;
 pub mod scanner;
+pub mod transfer;
 
 pub use address::{OrchardAddressManager, UnifiedAddressInfo};
 pub use builder::{OrchardTransactionBuilder, OrchardTransferParams};
-pub use keys::{OrchardKeyManager, OrchardViewingKey};
+pub use keys::{OrchardKeyManager, OrchardSpendingKey, OrchardViewingKey};
 pub use scanner::{OrchardNote, OrchardScanner, ScanProgress, ShieldedBalance};
+pub use transfer::{
+    FundSource, NetworkType, OrchardTransferService, TransferProposal, TransferRequest,
+    TransferResult, TransferStatus, TransparentInput,
+};
 
 /// Orchard protocol constants
 pub mod constants {

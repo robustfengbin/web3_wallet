@@ -43,6 +43,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig, auth_service: Arc<AuthServ
                     .route("/settings/rpc/test", web::post().to(handlers::test_rpc_endpoint))
                     // Orchard (Zcash privacy) routes
                     .route("/wallets/{id}/orchard/enable", web::post().to(handlers::enable_orchard))
+                    .route("/wallets/{id}/orchard/addresses", web::get().to(handlers::get_unified_addresses))
                     .route("/wallets/{id}/orchard/balance", web::get().to(handlers::get_shielded_balance))
                     .route("/wallets/{id}/orchard/balance/combined", web::get().to(handlers::get_combined_balance))
                     .route("/zcash/scan/status", web::get().to(handlers::get_scan_progress))

@@ -935,4 +935,12 @@ impl ChainClient for ZcashClient {
     async fn import_address_for_tracking(&self, address: &str, label: &str) -> AppResult<()> {
         self.import_address(address, label).await
     }
+
+    async fn get_block_height(&self) -> AppResult<u64> {
+        self.get_block_count().await
+    }
+
+    async fn broadcast_raw_transaction(&self, raw_tx_hex: &str) -> AppResult<String> {
+        self.send_raw_transaction(raw_tx_hex).await
+    }
 }

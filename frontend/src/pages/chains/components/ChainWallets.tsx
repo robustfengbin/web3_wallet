@@ -77,6 +77,22 @@ export function ChainWallets({ chainId }: ChainWalletsProps) {
         }
       });
       setBalances(newBalances);
+
+      // For Zcash wallets, load existing unified addresses
+      if (chainId === 'zcash') {
+        const addressPromises = data.map((w) =>
+          orchardApi.getUnifiedAddresses(w.id).catch(() => null)
+        );
+        const addressResults = await Promise.all(addressPromises);
+        const newUnifiedAddresses: Record<number, UnifiedAddressInfo> = {};
+        addressResults.forEach((addresses, index) => {
+          // Get the first unified address if exists
+          if (addresses && addresses.length > 0) {
+            newUnifiedAddresses[data[index].id] = addresses[0];
+          }
+        });
+        setUnifiedAddresses(newUnifiedAddresses);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load wallets');
     } finally {

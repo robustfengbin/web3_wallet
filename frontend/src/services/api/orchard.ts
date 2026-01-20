@@ -12,8 +12,10 @@ import type {
   CombinedZcashBalance,
   EnableOrchardRequest,
   EnableOrchardResponse,
+  ExecuteTransferRequest,
   GenerateAddressRequest,
   OrchardTransactionInfo,
+  OrchardTransferProposal,
   OrchardTransferRequest,
   OrchardTransferResponse,
   ScanProgress,
@@ -74,20 +76,23 @@ export async function getCombinedBalance(
 
 /**
  * Initiate an Orchard (shielded) transfer
+ * Returns a transfer proposal with fee estimation
  */
 export async function initiateOrchardTransfer(
   request: OrchardTransferRequest
-): Promise<OrchardTransferResponse> {
+): Promise<OrchardTransferProposal> {
   return axios.post('/transfers/orchard', request);
 }
 
 /**
  * Execute a pending Orchard transfer
+ * Requires the full proposal data from initiateOrchardTransfer
  */
 export async function executeOrchardTransfer(
-  transferId: number
+  proposalId: string,
+  request: ExecuteTransferRequest
 ): Promise<OrchardTransferResponse> {
-  return axios.post(`/transfers/orchard/${transferId}/execute`);
+  return axios.post(`/transfers/orchard/${proposalId}/execute`, request);
 }
 
 /**

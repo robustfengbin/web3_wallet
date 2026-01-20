@@ -12,6 +12,8 @@ import type {
   CombinedZcashBalance,
   ScanProgress as ScanProgressType,
   OrchardTransferRequest,
+  FundSource,
+  ExecuteTransferRequest,
 } from '../../../types/orchard';
 import { isUnifiedAddress, zecToZatoshis } from '../../../types/orchard';
 import type { Wallet } from '../../../types';
@@ -30,6 +32,7 @@ export function PrivacyTransfer() {
   const [toAddress, setToAddress] = useState('');
   const [amount, setAmount] = useState('');
   const [memo, setMemo] = useState('');
+  const [fundSource, setFundSource] = useState<FundSource>('auto');
 
   // UI state
   const [loading, setLoading] = useState(true);
@@ -137,6 +140,22 @@ export function PrivacyTransfer() {
     }
   };
 
+  // Get available balance based on fund source selection
+  const getAvailableBalance = (): number => {
+    const transparentZec = parseFloat(balance?.transparent_balance || '0');
+    const shieldedZec = (balance?.shielded_balance?.spendable_zatoshis || 0) / 100_000_000;
+
+    switch (fundSource) {
+      case 'transparent':
+        return transparentZec;
+      case 'shielded':
+        return shieldedZec;
+      case 'auto':
+      default:
+        return transparentZec + shieldedZec;
+    }
+  };
+
   // Validate form
   const validateForm = (): string | null => {
     if (!toAddress) {
@@ -155,14 +174,16 @@ export function PrivacyTransfer() {
     }
 
     const amountZec = parseFloat(amount);
-    // Can use both transparent and shielded balance for privacy transfers
-    // Transparent -> Shielded (shielding) is supported
-    const transparentZec = parseFloat(balance?.transparent_balance || '0');
-    const shieldedZec = (balance?.shielded_balance?.spendable_zatoshis || 0) / 100_000_000;
-    const totalAvailable = transparentZec + shieldedZec;
+    const availableBalance = getAvailableBalance();
 
-    if (amountZec > totalAvailable) {
-      return t('zcash.orchard.errors.insufficientBalance', 'Insufficient balance');
+    if (amountZec > availableBalance) {
+      const sourceLabel = fundSource === 'transparent'
+        ? t('zcash.orchard.transparentOnly', 'transparent')
+        : fundSource === 'shielded'
+        ? t('zcash.orchard.shieldedOnly', 'shielded')
+        : t('zcash.orchard.total', 'total');
+      return t('zcash.orchard.errors.insufficientSourceBalance',
+        `Insufficient ${sourceLabel} balance`);
     }
 
     return null;
@@ -192,17 +213,29 @@ export function PrivacyTransfer() {
         amount: amount,
         amount_zatoshis: zecToZatoshis(parseFloat(amount)),
         memo: memo || undefined,
+        fund_source: fundSource,
       };
 
-      // Initiate transfer
-      const initiateResponse = await orchardApi.initiateOrchardTransfer(request);
+      // Initiate transfer (creates proposal)
+      const proposal = await orchardApi.initiateOrchardTransfer(request);
 
-      // Execute transfer
+      // Execute transfer with full proposal data
       const executeResponse = await orchardApi.executeOrchardTransfer(
-        initiateResponse.transfer_id
+        proposal.proposal_id,
+        {
+          wallet_id: selectedWalletId,
+          proposal_id: proposal.proposal_id,
+          amount_zatoshis: proposal.amount_zatoshis,
+          fee_zatoshis: proposal.fee_zatoshis,
+          to_address: proposal.to_address,
+          memo: proposal.memo,
+          fund_source: proposal.fund_source,
+          is_shielding: proposal.is_shielding,
+          expiry_height: proposal.expiry_height,
+        }
       );
 
-      setTxHash(executeResponse.tx_hash);
+      setTxHash(executeResponse.tx_id);
       setSuccess(t('zcash.orchard.transferSuccess', 'Shielded transfer submitted successfully!'));
 
       // Clear form
@@ -214,7 +247,7 @@ export function PrivacyTransfer() {
       const combinedBalance = await orchardApi.getCombinedBalance(selectedWalletId);
       setBalance(combinedBalance);
     } catch (err: any) {
-      setError(err.response?.data?.message || err.message || 'Transfer failed');
+      setError(err.response?.data?.error || err.message || 'Transfer failed');
     } finally {
       setSubmitting(false);
     }
@@ -335,6 +368,56 @@ export function PrivacyTransfer() {
           </h3>
 
           <form onSubmit={handleSubmit} className="space-y-4">
+            {/* Fund Source Selection */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                {t('zcash.orchard.fundSource', 'Fund Source')}
+              </label>
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setFundSource('auto')}
+                  disabled={submitting}
+                  className={`px-3 py-2 text-sm rounded-lg border transition-colors ${
+                    fundSource === 'auto'
+                      ? 'bg-yellow-100 border-yellow-500 text-yellow-800'
+                      : 'border-gray-300 text-gray-600 hover:bg-gray-50'
+                  } disabled:opacity-50`}
+                >
+                  {t('zcash.orchard.fundAuto', 'Auto')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFundSource('shielded')}
+                  disabled={submitting || (balance?.shielded_balance?.spendable_zatoshis || 0) === 0}
+                  className={`px-3 py-2 text-sm rounded-lg border transition-colors ${
+                    fundSource === 'shielded'
+                      ? 'bg-green-100 border-green-500 text-green-800'
+                      : 'border-gray-300 text-gray-600 hover:bg-gray-50'
+                  } disabled:opacity-50 disabled:cursor-not-allowed`}
+                >
+                  {t('zcash.orchard.fundShielded', 'Shielded')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFundSource('transparent')}
+                  disabled={submitting || parseFloat(balance?.transparent_balance || '0') === 0}
+                  className={`px-3 py-2 text-sm rounded-lg border transition-colors ${
+                    fundSource === 'transparent'
+                      ? 'bg-blue-100 border-blue-500 text-blue-800'
+                      : 'border-gray-300 text-gray-600 hover:bg-gray-50'
+                  } disabled:opacity-50 disabled:cursor-not-allowed`}
+                >
+                  {t('zcash.orchard.fundTransparent', 'Transparent')}
+                </button>
+              </div>
+              <p className="mt-1 text-xs text-gray-500">
+                {fundSource === 'auto' && t('zcash.orchard.fundAutoDesc', 'Use shielded balance first, then transparent')}
+                {fundSource === 'shielded' && t('zcash.orchard.fundShieldedDesc', 'Maximum privacy - use only shielded balance')}
+                {fundSource === 'transparent' && t('zcash.orchard.fundTransparentDesc', 'Shielding operation - converts transparent to shielded')}
+              </p>
+            </div>
+
             {/* Recipient Address */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -372,10 +455,7 @@ export function PrivacyTransfer() {
                 <button
                   type="button"
                   onClick={() => {
-                    // Use total balance (transparent + shielded)
-                    const transparentZec = parseFloat(balance?.transparent_balance || '0');
-                    const shieldedZec = (balance?.shielded_balance?.spendable_zatoshis || 0) / 100_000_000;
-                    const maxZec = transparentZec + shieldedZec - 0.0001; // Leave some for fee
+                    const maxZec = getAvailableBalance() - 0.0001; // Leave some for fee
                     if (maxZec > 0) {
                       setAmount(maxZec.toFixed(8));
                     }
@@ -387,11 +467,8 @@ export function PrivacyTransfer() {
               </div>
               {balance && (
                 <p className="mt-1 text-xs text-gray-500">
-                  {t('zcash.orchard.availableTotal', 'Available: {{amount}} ZEC (transparent + shielded)', {
-                    amount: (
-                      parseFloat(balance.transparent_balance || '0') +
-                      (balance.shielded_balance?.spendable_zatoshis || 0) / 100_000_000
-                    ).toFixed(8),
+                  {t('zcash.orchard.availableSource', 'Available: {{amount}} ZEC', {
+                    amount: getAvailableBalance().toFixed(8),
                   })}
                 </p>
               )}
@@ -443,7 +520,7 @@ export function PrivacyTransfer() {
             <button
               type="submit"
               disabled={submitting || !toAddress || !amount}
-              className="w-full py-3 bg-yellow-500 text-white rounded-lg font-medium hover:bg-yellow-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              className="w-full py-4 bg-yellow-500 text-white rounded-lg font-medium hover:bg-yellow-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-lg"
             >
               {submitting ? (
                 <>
@@ -461,6 +538,9 @@ export function PrivacyTransfer() {
           </form>
         </Card>
       )}
+
+      {/* Bottom spacing */}
+      <div className="h-8" />
     </div>
   );
 }

@@ -108,6 +108,9 @@ export interface EnableOrchardResponse {
   viewing_key: string;
 }
 
+/** Fund source for transfers */
+export type FundSource = 'auto' | 'shielded' | 'transparent';
+
 /** Request for Orchard transfer */
 export interface OrchardTransferRequest {
   wallet_id: number;
@@ -120,13 +123,44 @@ export interface OrchardTransferRequest {
   memo?: string;
   /** Target pool for the transfer */
   target_pool?: ShieldedPool;
+  /** Source of funds: auto (shielded first), shielded only, or transparent only */
+  fund_source?: FundSource;
 }
 
-/** Response from Orchard transfer */
+/** Response from initiating Orchard transfer (proposal) */
+export interface OrchardTransferProposal {
+  proposal_id: string;
+  amount_zatoshis: number;
+  amount_zec: number;
+  fee_zatoshis: number;
+  fee_zec: number;
+  fund_source: string;
+  is_shielding: boolean;
+  to_address: string;
+  memo?: string;
+  expiry_height: number;
+}
+
+/** Request to execute a transfer */
+export interface ExecuteTransferRequest {
+  wallet_id: number;
+  proposal_id: string;
+  amount_zatoshis: number;
+  fee_zatoshis: number;
+  to_address: string;
+  memo?: string;
+  fund_source: string;
+  is_shielding: boolean;
+  expiry_height: number;
+}
+
+/** Response from executing Orchard transfer */
 export interface OrchardTransferResponse {
-  transfer_id: number;
-  tx_hash: string;
-  status: 'pending' | 'submitted' | 'confirmed' | 'failed';
+  tx_id: string;
+  status: string;
+  raw_tx?: string;
+  amount_zatoshis: number;
+  fee_zatoshis: number;
 }
 
 /** Request to generate new unified address */

@@ -33,6 +33,9 @@ pub enum AppError {
 
     // Internal errors
     InternalError(String),
+
+    // Not implemented errors
+    NotImplemented(String),
 }
 
 impl fmt::Display for AppError {
@@ -51,6 +54,7 @@ impl fmt::Display for AppError {
             AppError::DatabaseError(msg) => write!(f, "Database error: {}", msg),
             AppError::ConfigError(msg) => write!(f, "Configuration error: {}", msg),
             AppError::InternalError(msg) => write!(f, "Internal error: {}", msg),
+            AppError::NotImplemented(msg) => write!(f, "Not implemented: {}", msg),
         }
     }
 }
@@ -81,6 +85,9 @@ impl ResponseError for AppError {
             | AppError::DatabaseError(_) | AppError::ConfigError(_)
             | AppError::InternalError(_) => {
                 HttpResponse::InternalServerError().json(error_message)
+            }
+            AppError::NotImplemented(_) => {
+                HttpResponse::NotImplemented().json(error_message)
             }
         }
     }
