@@ -13,7 +13,11 @@
     "done": "完成",
     "active": "活跃",
     "admin": "管理员",
-    "operator": "操作员"
+    "operator": "操作员",
+    "optional": "可选",
+    "recommended": "推荐",
+    "max": "最大值",
+    "enabling": "启用中..."
   },
   "login": {
     "title": "Web3 钱包管理系统",
@@ -179,5 +183,65 @@
     "submitted": "已提交",
     "confirmed": "已确认",
     "failed": "失败"
+  },
+  "zcash": {
+    "transfer": {
+      "transparent": "透明转账",
+      "privacy": "隐私转账",
+      "transparentTitle": "透明（公开）转账",
+      "transparentDesc": "交易详情（发送方、接收方、金额）在区块链上公开可见。类似于比特币交易。",
+      "privacyTitle": "隐私（加密）转账",
+      "privacyDesc": "交易详情使用零知识证明加密。发送方、接收方和金额完全保密。"
+    },
+    "orchard": {
+      "title": "Zcash 隐私转账",
+      "subtitle": "使用 Orchard 协议进行端到端加密的隐私转账",
+      "addressType": "地址类型",
+      "totalBalance": "总余额",
+      "transparentBalance": "透明余额",
+      "transparentDesc": "在区块链上公开可见",
+      "shieldedBalance": "隐私余额 (Orchard)",
+      "shieldedDesc": "私密且加密",
+      "spendable": "可支配",
+      "pending": "待确认",
+      "noteCount": "{{count}} 个隐私票据",
+      "notEnabled": "Orchard 未启用",
+      "enablePrompt": "启用 Orchard 以接收隐私转账",
+      "enableOrchard": "启用隐私功能",
+      "enableDescription": "启用 Orchard 以接收和发送隐私交易。这将生成一个统一地址，同时支持透明和隐私转账。",
+      "enableButton": "启用 Orchard",
+      "enableSuccess": "Orchard 启用成功！",
+      "scanProgress": "区块链同步",
+      "syncing": "同步中...",
+      "sync": "同步",
+      "synced": "已完全同步",
+      "blockHeight": "区块 {{height}}",
+      "blocksRemaining": "剩余区块",
+      "estimatedTime": "预计时间",
+      "notesFound": "发现票据",
+      "chainTip": "链顶端",
+      "selectWallet": "选择钱包",
+      "noWallets": "没有 Zcash 钱包",
+      "createWalletPrompt": "创建 Zcash 钱包以使用隐私转账功能。",
+      "sendPrivate": "发送隐私转账",
+      "recipient": "接收地址",
+      "addressHint": "输入统一地址 (u1...) 以获得完整隐私保护",
+      "amount": "金额 (ZEC)",
+      "available": "可用: {{amount}} ZEC",
+      "encryptedMemo": "加密备注",
+      "memoPlaceholder": "输入加密备注（仅接收方可见）...",
+      "memoInfo": "此备注采用端到端加密。只有持有查看密钥的接收方才能阅读。备注存储在链上但完全私密。",
+      "privacyNotice": "端到端隐私保护",
+      "privacyDescription": "此交易使用 Orchard 协议和 Halo 2 证明系统。发送方、接收方、金额和备注都经过加密，对公众完全隐藏。",
+      "sendPrivateButton": "发送隐私转账",
+      "sending": "发送中...",
+      "transferSuccess": "隐私转账已成功提交！",
+      "errors": {
+        "addressRequired": "请输入接收地址",
+        "invalidAddress": "请输入有效的统一地址 (u1...)",
+        "amountRequired": "请输入有效金额",
+        "insufficientBalance": "隐私余额不足"
+      }
+    }
   }
 }

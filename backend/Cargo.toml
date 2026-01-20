@@ -80,6 +80,10 @@ blake2b_simd = "1.0"
 zcash_primitives = "0.20"
 zcash_protocol = "0.4"
 
+# Zcash Orchard privacy protocol support (using stable lower-level crates)
+orchard = "0.9"
+zcash_note_encryption = "0.4"
+
 # secp256k1 for key operations
 secp256k1 = { version = "0.28", features = ["rand"] }
 

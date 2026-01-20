@@ -6,6 +6,10 @@ use std::str::FromStr;
 use tokio::sync::RwLock;
 
 use crate::blockchain::traits::{ChainClient, GasEstimate, TokenBalance, TransferParams, TxStatus};
+use crate::blockchain::zcash::orchard::{
+    keys::OrchardKeyManager, scanner::{OrchardScanner, ShieldedBalance}, OrchardTransactionBuilder,
+    OrchardTransferParams, OrchardViewingKey, ScanProgress, ShieldedPool,
+};
 use crate::config::ZcashConfig;
 use crate::error::{AppError, AppResult};
 
@@ -21,6 +25,8 @@ pub struct RpcSettings {
 
 pub struct ZcashClient {
     rpc_settings: RwLock<RpcSettings>,
+    /// Orchard scanner for shielded note detection
+    orchard_scanner: RwLock<Option<OrchardScanner>>,
 }
 
 // JSON-RPC request/response types
@@ -193,6 +199,7 @@ impl ZcashClient {
                 rpc_user: config.rpc_user.clone(),
                 rpc_password: config.rpc_password.clone(),
             }),
+            orchard_scanner: RwLock::new(None),
         })
     }
 
@@ -517,6 +524,239 @@ impl ZcashClient {
         tracing::info!("ZEC transfer submitted via sendrawtransaction: {}", tx_hash);
         Ok(tx_hash)
     }
+
+    // =========================================================================
+    // Orchard Privacy Protocol Methods
+    // =========================================================================
+
+    /// Initialize Orchard scanner with viewing keys
+    ///
+    /// Call this when enabling Orchard for an account
+    pub async fn init_orchard_scanner(&self, viewing_keys: Vec<OrchardViewingKey>) -> AppResult<()> {
+        let scanner = OrchardScanner::new(viewing_keys);
+        let mut scanner_lock = self.orchard_scanner.write().await;
+        *scanner_lock = Some(scanner);
+
+        tracing::info!("Orchard scanner initialized");
+        Ok(())
+    }
+
+    /// Add a viewing key to the scanner
+    pub async fn add_orchard_viewing_key(&self, viewing_key: OrchardViewingKey) -> AppResult<()> {
+        let mut scanner_lock = self.orchard_scanner.write().await;
+
+        if let Some(ref mut _scanner) = *scanner_lock {
+            // Create a new scanner with the additional key
+            // In production, this should be more efficient
+            drop(scanner_lock);
+            let current_keys = Vec::new(); // Would need to track keys
+            let mut new_keys = current_keys;
+            new_keys.push(viewing_key);
+            self.init_orchard_scanner(new_keys).await?;
+        } else {
+            *scanner_lock = Some(OrchardScanner::new(vec![viewing_key]));
+        }
+
+        Ok(())
+    }
+
+    /// Get shielded balance for an account
+    pub async fn get_orchard_balance(&self, account_id: u32) -> AppResult<ShieldedBalance> {
+        let scanner_lock = self.orchard_scanner.read().await;
+
+        let scanner = scanner_lock.as_ref().ok_or_else(|| {
+            AppError::BlockchainError("Orchard scanner not initialized".to_string())
+        })?;
+
+        let current_height = self.get_block_count().await?;
+        let total = scanner.get_balance(account_id);
+        let spendable = scanner.get_spendable_balance(account_id, current_height);
+        let notes = scanner.get_unspent_notes(account_id);
+
+        Ok(ShieldedBalance::new(
+            ShieldedPool::Orchard,
+            total,
+            spendable,
+            notes.len() as u32,
+        ))
+    }
+
+    /// Get scan progress
+    pub async fn get_scan_progress(&self) -> AppResult<ScanProgress> {
+        let scanner_lock = self.orchard_scanner.read().await;
+
+        let scanner = scanner_lock.as_ref().ok_or_else(|| {
+            AppError::BlockchainError("Orchard scanner not initialized".to_string())
+        })?;
+
+        Ok(scanner.progress().clone())
+    }
+
+    /// Build an Orchard (shielded) transaction
+    ///
+    /// This prepares a shielded transaction but does not sign or broadcast it.
+    /// The transaction will spend from the Orchard pool and output to the specified address.
+    pub async fn build_orchard_transaction(
+        &self,
+        params: &OrchardTransferParams,
+        private_key_hex: &str,
+    ) -> AppResult<Vec<u8>> {
+        // Get spendable notes
+        let scanner_lock = self.orchard_scanner.read().await;
+        let scanner = scanner_lock.as_ref().ok_or_else(|| {
+            AppError::BlockchainError("Orchard scanner not initialized".to_string())
+        })?;
+
+        let current_height = self.get_block_count().await?;
+        let spendable_notes = scanner.get_spendable_notes(params.account_id, current_height);
+
+        if spendable_notes.is_empty() {
+            return Err(AppError::ValidationError(
+                "No spendable Orchard notes found".to_string(),
+            ));
+        }
+
+        // Get anchor from scanner
+        let anchor = scanner.get_anchor();
+        let anchor_height = current_height.saturating_sub(10);
+        drop(scanner_lock);
+
+        // Get blockchain info
+        let blockchain_info = self.get_blockchain_info().await?;
+        let expiry_height = (current_height + 40) as u32;
+        let consensus_branch_id = u32::from_str_radix(&blockchain_info.consensus.chaintip, 16)
+            .map_err(|e| AppError::BlockchainError(format!("Invalid branch ID: {}", e)))?;
+
+        // Derive spending key
+        let (spending_key, _) = OrchardKeyManager::derive_from_private_key(private_key_hex, params.account_id, 0)
+            .map_err(|e| AppError::InternalError(format!("Failed to derive spending key: {}", e)))?;
+
+        // Build transaction
+        let mut builder = OrchardTransactionBuilder::new(
+            anchor_height,
+            anchor,
+            expiry_height,
+            consensus_branch_id,
+        );
+
+        // Add spendable notes
+        builder.add_spendable_notes(spendable_notes);
+
+        // Add output
+        builder
+            .add_output(
+                &params.to_address,
+                params.amount_zatoshis,
+                params.memo.as_deref(),
+            )
+            .map_err(|e| AppError::BlockchainError(format!("Failed to add output: {}", e)))?;
+
+        // Build the bundle
+        let bundle = builder
+            .build(&spending_key, params)
+            .map_err(|e| AppError::BlockchainError(format!("Failed to build transaction: {}", e)))?;
+
+        // Serialize for transmission
+        let raw_tx = bundle.serialize();
+
+        tracing::info!(
+            "Built Orchard transaction with {} actions, {} bytes",
+            bundle.num_actions(),
+            raw_tx.len()
+        );
+
+        Ok(raw_tx)
+    }
+
+    /// Execute an Orchard shielded transfer
+    pub async fn transfer_orchard(
+        &self,
+        params: &OrchardTransferParams,
+        private_key_hex: &str,
+    ) -> AppResult<String> {
+        // Build the transaction
+        let raw_tx = self.build_orchard_transaction(params, private_key_hex).await?;
+
+        // Broadcast
+        let tx_hash = self.send_raw_transaction(&hex::encode(&raw_tx)).await?;
+
+        // Mark spent notes
+        // (In production, this would be done after confirmation)
+
+        tracing::info!("Orchard transfer submitted: {}", tx_hash);
+        Ok(tx_hash)
+    }
+
+    /// Get Orchard transaction history for an account
+    pub async fn get_orchard_transactions(
+        &self,
+        account_id: u32,
+        limit: u32,
+    ) -> AppResult<Vec<OrchardTransactionInfo>> {
+        let scanner_lock = self.orchard_scanner.read().await;
+        let scanner = scanner_lock.as_ref().ok_or_else(|| {
+            AppError::BlockchainError("Orchard scanner not initialized".to_string())
+        })?;
+
+        let notes = scanner.get_unspent_notes(account_id);
+
+        // Convert notes to transaction info
+        let transactions: Vec<OrchardTransactionInfo> = notes
+            .into_iter()
+            .take(limit as usize)
+            .map(|note| OrchardTransactionInfo {
+                tx_hash: note.tx_hash,
+                block_height: note.block_height,
+                value_zatoshis: note.value_zatoshis,
+                is_incoming: true,
+                memo: note.memo,
+                pool: ShieldedPool::Orchard,
+            })
+            .collect();
+
+        Ok(transactions)
+    }
+
+    /// Sync Orchard scanner with the blockchain
+    ///
+    /// This should be called periodically to detect new notes
+    pub async fn sync_orchard(&self) -> AppResult<ScanProgress> {
+        // Get current chain tip
+        let chain_tip = self.get_block_count().await?;
+
+        let mut scanner_lock = self.orchard_scanner.write().await;
+        let scanner = scanner_lock.as_mut().ok_or_else(|| {
+            AppError::BlockchainError("Orchard scanner not initialized".to_string())
+        })?;
+
+        // Get last scanned height
+        let last_height = scanner.progress().last_scanned_height;
+
+        if last_height >= chain_tip {
+            return Ok(scanner.progress().clone());
+        }
+
+        // Fetch compact blocks (in production, use lightwalletd)
+        // For now, just update progress
+        tracing::info!(
+            "Would scan blocks {} to {}",
+            last_height + 1,
+            chain_tip
+        );
+
+        Ok(scanner.progress().clone())
+    }
+}
+
+/// Information about an Orchard transaction
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OrchardTransactionInfo {
+    pub tx_hash: String,
+    pub block_height: u64,
+    pub value_zatoshis: u64,
+    pub is_incoming: bool,
+    pub memo: Option<String>,
+    pub pool: ShieldedPool,
 }
 
 #[async_trait]

@@ -2524,6 +2524,15 @@ dependencies = [
 
 [[package]]
 name = "incrementalmerkletree"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75346da3bd8e3d8891d02508245ed2df34447ca6637e343829f8d08986e9cde2"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "incrementalmerkletree"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "216c71634ac6f6ed13c2102d64354c0a04dcbdc30e31692c5972d3974d8b6d97"
@@ -2862,6 +2871,9 @@ name = "memuse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d97bbf43eb4f088f8ca469930cde17fa036207c9a5e02ccc5107c4e8b17c964"
+dependencies = [
+ "nonempty",
+]
 
 [[package]]
 name = "mime"
@@ -3128,6 +3140,37 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "orchard"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4dc7bde644aeb980be296cd908c6650894dc8541deb56f9f5294c52ed7ca568f"
+dependencies = [
+ "aes",
+ "bitvec",
+ "blake2b_simd",
+ "ff",
+ "fpe",
+ "group",
+ "halo2_gadgets",
+ "halo2_proofs",
+ "hex",
+ "incrementalmerkletree 0.6.0",
+ "lazy_static",
+ "memuse",
+ "nonempty",
+ "pasta_curves",
+ "rand 0.8.5",
+ "reddsa",
+ "serde",
+ "subtle",
+ "tracing",
+ "visibility",
+ "zcash_note_encryption",
+ "zcash_spec",
+ "zip32",
+]
+
+[[package]]
+name = "orchard"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2f4cf75baf85bbd6f15eb919b7e70afdc4a311eef0a3e8a053e65542fe2b58e"
@@ -3144,7 +3187,7 @@ dependencies = [
  "halo2_poseidon",
  "halo2_proofs",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.7.1",
  "lazy_static",
  "memuse",
  "nonempty",
@@ -4189,7 +4232,7 @@ dependencies = [
  "fpe",
  "group",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.7.1",
  "jubjub",
  "lazy_static",
  "memuse",
@@ -5683,6 +5726,7 @@ dependencies = [
  "hex",
  "jsonwebtoken 9.3.1",
  "once_cell",
+ "orchard 0.9.0",
  "rand 0.8.5",
  "reqwest",
  "ripemd",
@@ -5699,6 +5743,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "url",
+ "zcash_note_encryption",
  "zcash_primitives",
  "zcash_protocol",
 ]
@@ -6183,11 +6228,11 @@ dependencies = [
  "fpe",
  "group",
  "hex",
- "incrementalmerkletree",
+ "incrementalmerkletree 0.7.1",
  "jubjub",
  "memuse",
  "nonempty",
- "orchard",
+ "orchard 0.10.2",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "redjubjub",

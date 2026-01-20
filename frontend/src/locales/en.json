@@ -13,7 +13,11 @@
     "done": "Done",
     "active": "Active",
     "admin": "Admin",
-    "operator": "Operator"
+    "operator": "Operator",
+    "optional": "Optional",
+    "recommended": "Recommended",
+    "max": "Max",
+    "enabling": "Enabling..."
   },
   "login": {
     "title": "Web3 Wallet Service",
@@ -179,5 +183,65 @@
     "submitted": "Submitted",
     "confirmed": "Confirmed",
     "failed": "Failed"
+  },
+  "zcash": {
+    "transfer": {
+      "transparent": "Transparent Transfer",
+      "privacy": "Privacy Transfer",
+      "transparentTitle": "Transparent (Public) Transfer",
+      "transparentDesc": "Transaction details (sender, recipient, amount) are visible on the blockchain. Similar to Bitcoin transactions.",
+      "privacyTitle": "Private (Shielded) Transfer",
+      "privacyDesc": "Transaction details are encrypted using zero-knowledge proofs. Sender, recipient, and amount remain completely private."
+    },
+    "orchard": {
+      "title": "Zcash Privacy Transfer",
+      "subtitle": "Send ZEC with full end-to-end privacy using Orchard",
+      "addressType": "Address Type",
+      "totalBalance": "Total Balance",
+      "transparentBalance": "Transparent",
+      "transparentDesc": "Publicly visible on blockchain",
+      "shieldedBalance": "Shielded (Orchard)",
+      "shieldedDesc": "Private and encrypted",
+      "spendable": "Spendable",
+      "pending": "Pending",
+      "noteCount": "{{count}} shielded notes",
+      "notEnabled": "Orchard Not Enabled",
+      "enablePrompt": "Enable Orchard to receive private transfers",
+      "enableOrchard": "Enable Privacy Features",
+      "enableDescription": "Enable Orchard to receive and send private transactions. This will generate a unified address that supports both transparent and shielded transfers.",
+      "enableButton": "Enable Orchard",
+      "enableSuccess": "Orchard enabled successfully!",
+      "scanProgress": "Blockchain Sync",
+      "syncing": "Syncing...",
+      "sync": "Sync",
+      "synced": "Fully synced",
+      "blockHeight": "Block {{height}}",
+      "blocksRemaining": "Blocks remaining",
+      "estimatedTime": "Est. time",
+      "notesFound": "Notes found",
+      "chainTip": "Chain tip",
+      "selectWallet": "Select Wallet",
+      "noWallets": "No Zcash Wallets",
+      "createWalletPrompt": "Create a Zcash wallet to use privacy transfers.",
+      "sendPrivate": "Send Private Transfer",
+      "recipient": "Recipient Address",
+      "addressHint": "Enter a unified address (u1...) for full privacy",
+      "amount": "Amount (ZEC)",
+      "available": "Available: {{amount}} ZEC",
+      "encryptedMemo": "Encrypted Memo",
+      "memoPlaceholder": "Enter an encrypted memo (only visible to recipient)...",
+      "memoInfo": "This memo is encrypted end-to-end. Only the recipient with the viewing key can read it. The memo is stored on-chain but completely private.",
+      "privacyNotice": "End-to-End Privacy Protected",
+      "privacyDescription": "This transaction uses the Orchard protocol with Halo 2 proofs. The sender, recipient, amount, and memo are all encrypted and hidden from public view.",
+      "sendPrivateButton": "Send Private Transfer",
+      "sending": "Sending...",
+      "transferSuccess": "Shielded transfer submitted successfully!",
+      "errors": {
+        "addressRequired": "Recipient address is required",
+        "invalidAddress": "Please enter a valid unified address (u1...)",
+        "amountRequired": "Please enter a valid amount",
+        "insufficientBalance": "Insufficient shielded balance"
+      }
+    }
   }
 }

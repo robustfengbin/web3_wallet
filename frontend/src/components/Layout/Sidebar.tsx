@@ -57,7 +57,7 @@ function ChainSection({ chain, isExpanded }: ChainSectionProps) {
       </NavLink>
 
       {isExpanded && (
-        <div className="bg-gray-950">
+        <div className="bg-gray-950 w-full">
           <NavLink
             to={`${basePath}/wallets`}
             className={({ isActive }) =>
@@ -109,7 +109,7 @@ export function Sidebar() {
   const location = useLocation();
 
   return (
-    <aside className="w-64 bg-gray-900 text-white min-h-screen">
+    <aside className="w-64 bg-gray-900 text-white min-h-screen overflow-hidden">
       <div className="p-6">
         <h1 className="text-xl font-bold">{t('sidebar.title')}</h1>
         <p className="text-gray-400 text-sm mt-1">{t('sidebar.subtitle')}</p>
