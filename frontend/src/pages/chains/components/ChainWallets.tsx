@@ -7,11 +7,14 @@ import {
   CheckCircle,
   RefreshCw,
   Copy,
+  Shield,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Card, LoadingSpinner, Modal } from '../../../components/Common';
 import { walletService } from '../../../services/api';
+import orchardApi from '../../../services/api/orchard';
 import { Wallet, BalanceResponse } from '../../../types';
+import type { UnifiedAddressInfo } from '../../../types/orchard';
 import { useAuth } from '../../../hooks/useAuth';
 import { getChain, ChainConfig } from '../../../config/chains';
 
@@ -26,6 +29,7 @@ export function ChainWallets({ chainId }: ChainWalletsProps) {
 
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [balances, setBalances] = useState<Record<string, BalanceResponse>>({});
+  const [unifiedAddresses, setUnifiedAddresses] = useState<Record<number, UnifiedAddressInfo>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -34,7 +38,9 @@ export function ChainWallets({ chainId }: ChainWalletsProps) {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
+  const [showPrivacyAddressModal, setShowPrivacyAddressModal] = useState(false);
   const [selectedWalletId, setSelectedWalletId] = useState<number | null>(null);
+  const [generatingPrivacyAddress, setGeneratingPrivacyAddress] = useState<number | null>(null);
 
   // Form states
   const [walletName, setWalletName] = useState('');
@@ -154,6 +160,27 @@ export function ChainWallets({ chainId }: ChainWalletsProps) {
     setSuccess(t('wallets.copiedToClipboard'));
   };
 
+  // Generate privacy address for Zcash wallet
+  const handleGeneratePrivacyAddress = async (walletId: number) => {
+    setGeneratingPrivacyAddress(walletId);
+    setError('');
+    try {
+      const response = await orchardApi.enableOrchard({
+        wallet_id: walletId,
+        birthday_height: 2000000, // TODO: Get current block height
+      });
+      setUnifiedAddresses((prev) => ({
+        ...prev,
+        [walletId]: response.unified_address,
+      }));
+      setSuccess(t('zcash.orchard.enableSuccess', 'Privacy address generated successfully!'));
+    } catch (err: any) {
+      setError(err.response?.data?.message || err.message || 'Failed to generate privacy address');
+    } finally {
+      setGeneratingPrivacyAddress(null);
+    }
+  };
+
   const isAdmin = user?.role === 'admin';
 
   if (isLoading) {
@@ -236,6 +263,7 @@ export function ChainWallets({ chainId }: ChainWalletsProps) {
                   )}
                 </div>
 
+                {/* Transparent Address */}
                 <div className="mt-2 flex items-center">
                   <code className="text-sm text-gray-600 bg-gray-100 px-2 py-1 rounded">
                     {wallet.address}
@@ -243,10 +271,59 @@ export function ChainWallets({ chainId }: ChainWalletsProps) {
                   <button
                     onClick={() => copyToClipboard(wallet.address)}
                     className="ml-2 text-gray-400 hover:text-gray-600"
+                    title={t('common.copy')}
                   >
                     <Copy className="w-4 h-4" />
                   </button>
                 </div>
+
+                {/* Zcash Privacy Address Section */}
+                {chainId === 'zcash' && (
+                  <div className="mt-3">
+                    {unifiedAddresses[wallet.id] ? (
+                      // Show unified address if already generated
+                      <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Shield className="w-4 h-4 text-green-600" />
+                          <span className="text-sm font-medium text-green-800">
+                            {t('zcash.orchard.privacyAddress', 'Privacy Address (Unified)')}
+                          </span>
+                        </div>
+                        <div className="flex items-center">
+                          <code className="text-xs text-green-700 bg-green-100 px-2 py-1 rounded break-all">
+                            {unifiedAddresses[wallet.id].address.slice(0, 30)}...
+                          </code>
+                          <button
+                            onClick={() => copyToClipboard(unifiedAddresses[wallet.id].address)}
+                            className="ml-2 text-green-600 hover:text-green-800"
+                            title={t('common.copy')}
+                          >
+                            <Copy className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      // Show generate button if not generated
+                      <button
+                        onClick={() => handleGeneratePrivacyAddress(wallet.id)}
+                        disabled={generatingPrivacyAddress === wallet.id}
+                        className="flex items-center gap-2 px-3 py-2 text-sm bg-yellow-100 text-yellow-800 rounded-lg hover:bg-yellow-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      >
+                        {generatingPrivacyAddress === wallet.id ? (
+                          <>
+                            <LoadingSpinner size="sm" />
+                            {t('zcash.orchard.generating', 'Generating...')}
+                          </>
+                        ) : (
+                          <>
+                            <Shield className="w-4 h-4" />
+                            {t('zcash.orchard.generatePrivacyAddress', 'Generate Privacy Address')}
+                          </>
+                        )}
+                      </button>
+                    )}
+                  </div>
+                )}
 
                 {balances[wallet.address] && (
                   <div className="mt-3">
