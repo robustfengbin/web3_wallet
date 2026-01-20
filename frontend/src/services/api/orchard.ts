@@ -2,6 +2,9 @@
  * Orchard Privacy Protocol API Service
  *
  * API endpoints for Zcash Orchard shielded transfers.
+ *
+ * Note: axios interceptor already extracts response.data, so we return
+ * the result directly without accessing .data again.
  */
 
 import axios from './axios';
@@ -26,11 +29,10 @@ import type {
 export async function enableOrchard(
   request: EnableOrchardRequest
 ): Promise<EnableOrchardResponse> {
-  const response = await axios.post<EnableOrchardResponse>(
+  return axios.post(
     `/wallets/${request.wallet_id}/orchard/enable`,
     { birthday_height: request.birthday_height }
   );
-  return response.data;
 }
 
 /**
@@ -39,10 +41,7 @@ export async function enableOrchard(
 export async function getUnifiedAddresses(
   walletId: number
 ): Promise<UnifiedAddressInfo[]> {
-  const response = await axios.get<UnifiedAddressInfo[]>(
-    `/wallets/${walletId}/orchard/addresses`
-  );
-  return response.data;
+  return axios.get(`/wallets/${walletId}/orchard/addresses`);
 }
 
 /**
@@ -52,11 +51,7 @@ export async function generateUnifiedAddress(
   walletId: number,
   request: GenerateAddressRequest
 ): Promise<UnifiedAddressInfo> {
-  const response = await axios.post<UnifiedAddressInfo>(
-    `/wallets/${walletId}/orchard/addresses`,
-    request
-  );
-  return response.data;
+  return axios.post(`/wallets/${walletId}/orchard/addresses`, request);
 }
 
 /**
@@ -65,10 +60,7 @@ export async function generateUnifiedAddress(
 export async function getShieldedBalance(
   walletId: number
 ): Promise<ShieldedBalance> {
-  const response = await axios.get<ShieldedBalance>(
-    `/wallets/${walletId}/orchard/balance`
-  );
-  return response.data;
+  return axios.get(`/wallets/${walletId}/orchard/balance`);
 }
 
 /**
@@ -77,10 +69,7 @@ export async function getShieldedBalance(
 export async function getCombinedBalance(
   walletId: number
 ): Promise<CombinedZcashBalance> {
-  const response = await axios.get<CombinedZcashBalance>(
-    `/wallets/${walletId}/orchard/balance/combined`
-  );
-  return response.data;
+  return axios.get(`/wallets/${walletId}/orchard/balance/combined`);
 }
 
 /**
@@ -89,11 +78,7 @@ export async function getCombinedBalance(
 export async function initiateOrchardTransfer(
   request: OrchardTransferRequest
 ): Promise<OrchardTransferResponse> {
-  const response = await axios.post<OrchardTransferResponse>(
-    '/transfers/orchard',
-    request
-  );
-  return response.data;
+  return axios.post('/transfers/orchard', request);
 }
 
 /**
@@ -102,10 +87,7 @@ export async function initiateOrchardTransfer(
 export async function executeOrchardTransfer(
   transferId: number
 ): Promise<OrchardTransferResponse> {
-  const response = await axios.post<OrchardTransferResponse>(
-    `/transfers/orchard/${transferId}/execute`
-  );
-  return response.data;
+  return axios.post(`/transfers/orchard/${transferId}/execute`);
 }
 
 /**
@@ -115,27 +97,23 @@ export async function getOrchardTransactions(
   walletId: number,
   limit: number = 50
 ): Promise<OrchardTransactionInfo[]> {
-  const response = await axios.get<OrchardTransactionInfo[]>(
-    `/wallets/${walletId}/orchard/transactions`,
-    { params: { limit } }
-  );
-  return response.data;
+  return axios.get(`/wallets/${walletId}/orchard/transactions`, {
+    params: { limit },
+  });
 }
 
 /**
  * Get scan progress
  */
 export async function getScanProgress(): Promise<ScanProgress> {
-  const response = await axios.get<ScanProgress>('/zcash/scan/status');
-  return response.data;
+  return axios.get('/zcash/scan/status');
 }
 
 /**
  * Trigger a sync of the Orchard scanner
  */
 export async function syncOrchard(): Promise<ScanProgress> {
-  const response = await axios.post<ScanProgress>('/zcash/scan/sync');
-  return response.data;
+  return axios.post('/zcash/scan/sync');
 }
 
 /**
@@ -144,11 +122,7 @@ export async function syncOrchard(): Promise<ScanProgress> {
 export async function parseUnifiedAddress(
   address: string
 ): Promise<UnifiedAddressInfo> {
-  const response = await axios.get<UnifiedAddressInfo>(
-    '/zcash/address/parse',
-    { params: { address } }
-  );
-  return response.data;
+  return axios.get('/zcash/address/parse', { params: { address } });
 }
 
 /**
@@ -158,11 +132,7 @@ export async function validateUnifiedAddress(
   address: string
 ): Promise<{ valid: boolean; error?: string }> {
   try {
-    const response = await axios.get<{ valid: boolean }>(
-      '/zcash/address/validate',
-      { params: { address } }
-    );
-    return response.data;
+    return await axios.get('/zcash/address/validate', { params: { address } });
   } catch (error: any) {
     return {
       valid: false,
@@ -181,12 +151,7 @@ export async function estimateOrchardFee(
   fee_zec: string;
   num_actions: number;
 }> {
-  const response = await axios.post<{
-    fee_zatoshis: number;
-    fee_zec: string;
-    num_actions: number;
-  }>('/transfers/orchard/estimate-fee', request);
-  return response.data;
+  return axios.post('/transfers/orchard/estimate-fee', request);
 }
 
 /**
