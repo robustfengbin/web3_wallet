@@ -363,21 +363,17 @@ impl OrchardAddressManager {
     }
 
     /// F4Jumble encoding (simplified)
+    ///
+    /// F4Jumble is a length-preserving pseudorandom permutation used in unified addresses.
+    /// For inputs larger than 64 bytes (Blake2b max output), we generate the keystream
+    /// in 64-byte chunks.
     fn f4_jumble(&self, input: &[u8]) -> OrchardResult<Vec<u8>> {
-        // Simplified F4Jumble - in production, use proper implementation
-        // F4Jumble is a length-preserving pseudorandom permutation
-        let mut hasher = blake2b_simd::Params::new()
-            .hash_length(input.len().max(48))
-            .personal(b"ZcashF4Jumble__")
-            .to_state();
-        hasher.update(input);
-        hasher.update(&[0x00]); // Direction flag
-        let hash = hasher.finalize();
+        let keystream = Self::generate_keystream(input.len(), input, 0x00)?;
 
-        // XOR the input with the hash
+        // XOR the input with the keystream
         let mut result = input.to_vec();
         for (i, byte) in result.iter_mut().enumerate() {
-            *byte ^= hash.as_bytes()[i % hash.as_bytes().len()];
+            *byte ^= keystream[i];
         }
 
         Ok(result)
@@ -385,26 +381,42 @@ impl OrchardAddressManager {
 
     /// F4Jumble inverse
     fn f4_jumble_inv(input: &[u8]) -> OrchardResult<Vec<u8>> {
-        // F4Jumble is its own inverse with the direction flag
-        let mut hasher = blake2b_simd::Params::new()
-            .hash_length(input.len().max(48))
-            .personal(b"ZcashF4Jumble__")
-            .to_state();
+        let keystream = Self::generate_keystream(input.len(), input, 0x01)?;
 
-        // For inverse, we need to compute the same hash from the result
-        // This is a simplified version - real implementation is more complex
+        // XOR with keystream to get original
         let mut result = input.to_vec();
-
-        // XOR with hash to get original
-        hasher.update(&result);
-        hasher.update(&[0x01]); // Inverse direction flag
-        let hash = hasher.finalize();
-
         for (i, byte) in result.iter_mut().enumerate() {
-            *byte ^= hash.as_bytes()[i % hash.as_bytes().len()];
+            *byte ^= keystream[i];
         }
 
         Ok(result)
+    }
+
+    /// Generate a keystream of the specified length using Blake2b
+    ///
+    /// For outputs larger than 64 bytes, we generate multiple 64-byte chunks
+    /// using a counter mode approach.
+    fn generate_keystream(length: usize, seed: &[u8], direction: u8) -> OrchardResult<Vec<u8>> {
+        let mut keystream = Vec::with_capacity(length);
+        let mut counter: u32 = 0;
+
+        while keystream.len() < length {
+            let chunk_size = std::cmp::min(64, length - keystream.len());
+
+            let mut hasher = blake2b_simd::Params::new()
+                .hash_length(chunk_size)
+                .personal(b"ZcashF4Jumble__")
+                .to_state();
+            hasher.update(seed);
+            hasher.update(&[direction]);
+            hasher.update(&counter.to_le_bytes());
+            let hash = hasher.finalize();
+
+            keystream.extend_from_slice(&hash.as_bytes()[..chunk_size]);
+            counter += 1;
+        }
+
+        Ok(keystream)
     }
 
     /// Bech32m encode
