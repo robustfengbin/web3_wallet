@@ -155,11 +155,14 @@ export function PrivacyTransfer() {
     }
 
     const amountZec = parseFloat(amount);
-    const spendable = balance?.shielded_balance?.spendable_zatoshis || 0;
-    const spendableZec = spendable / 100_000_000;
+    // Can use both transparent and shielded balance for privacy transfers
+    // Transparent -> Shielded (shielding) is supported
+    const transparentZec = parseFloat(balance?.transparent_balance || '0');
+    const shieldedZec = (balance?.shielded_balance?.spendable_zatoshis || 0) / 100_000_000;
+    const totalAvailable = transparentZec + shieldedZec;
 
-    if (amountZec > spendableZec) {
-      return t('zcash.orchard.errors.insufficientBalance', 'Insufficient shielded balance');
+    if (amountZec > totalAvailable) {
+      return t('zcash.orchard.errors.insufficientBalance', 'Insufficient balance');
     }
 
     return null;
@@ -369,8 +372,10 @@ export function PrivacyTransfer() {
                 <button
                   type="button"
                   onClick={() => {
-                    const max = balance?.shielded_balance?.spendable_zatoshis || 0;
-                    const maxZec = (max / 100_000_000) - 0.0001; // Leave some for fee
+                    // Use total balance (transparent + shielded)
+                    const transparentZec = parseFloat(balance?.transparent_balance || '0');
+                    const shieldedZec = (balance?.shielded_balance?.spendable_zatoshis || 0) / 100_000_000;
+                    const maxZec = transparentZec + shieldedZec - 0.0001; // Leave some for fee
                     if (maxZec > 0) {
                       setAmount(maxZec.toFixed(8));
                     }
@@ -380,10 +385,13 @@ export function PrivacyTransfer() {
                   {t('common.max', 'Max')}
                 </button>
               </div>
-              {balance?.shielded_balance && (
+              {balance && (
                 <p className="mt-1 text-xs text-gray-500">
-                  {t('zcash.orchard.available', 'Available: {{amount}} ZEC', {
-                    amount: (balance.shielded_balance.spendable_zatoshis / 100_000_000).toFixed(8),
+                  {t('zcash.orchard.availableTotal', 'Available: {{amount}} ZEC (transparent + shielded)', {
+                    amount: (
+                      parseFloat(balance.transparent_balance || '0') +
+                      (balance.shielded_balance?.spendable_zatoshis || 0) / 100_000_000
+                    ).toFixed(8),
                   })}
                 </p>
               )}

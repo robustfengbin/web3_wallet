@@ -231,6 +231,7 @@
       "addressHint": "Enter a unified address (u1...) for full privacy",
       "amount": "Amount (ZEC)",
       "available": "Available: {{amount}} ZEC",
+      "availableTotal": "Available: {{amount}} ZEC (transparent + shielded)",
       "encryptedMemo": "Encrypted Memo",
       "memoPlaceholder": "Enter an encrypted memo (only visible to recipient)...",
       "memoInfo": "This memo is encrypted end-to-end. Only the recipient with the viewing key can read it. The memo is stored on-chain but completely private.",

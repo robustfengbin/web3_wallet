@@ -231,6 +231,7 @@
       "addressHint": "输入统一地址 (u1...) 以获得完整隐私保护",
       "amount": "金额 (ZEC)",
       "available": "可用: {{amount}} ZEC",
+      "availableTotal": "可用: {{amount}} ZEC（透明 + 隐私）",
       "encryptedMemo": "加密备注",
       "memoPlaceholder": "输入加密备注（仅接收方可见）...",
       "memoInfo": "此备注采用端到端加密。只有持有查看密钥的接收方才能阅读。备注存储在链上但完全私密。",
