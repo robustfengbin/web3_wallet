@@ -167,6 +167,8 @@ impl OrchardSyncService {
     /// Register a wallet's viewing key for scanning
     pub async fn register_wallet(&self, wallet_id: i32, viewing_key: OrchardViewingKey) {
         let birthday = viewing_key.birthday_height;
+        // Set wallet_id on the viewing key for proper note tracking
+        let viewing_key = viewing_key.with_wallet_id(wallet_id);
         let mut keys = self.wallet_keys.write().await;
         keys.insert(wallet_id, viewing_key.clone());
 
@@ -698,26 +700,44 @@ impl OrchardSyncService {
         let mut db_notes: Vec<(i32, String, u64, u64, String, u32, Option<String>)> = Vec::new();
 
         for note in notes {
-            // Find wallet_id for this account
-            for (wallet_id, vk) in keys.iter() {
-                if vk.account_index == note.account_id {
-                    // Memory store
-                    notes_by_wallet
-                        .entry(*wallet_id)
-                        .or_insert_with(Vec::new)
-                        .push(note.clone());
+            // Use wallet_id directly from the note (set during decryption)
+            if let Some(wallet_id) = note.wallet_id {
+                // Memory store
+                notes_by_wallet
+                    .entry(wallet_id)
+                    .or_insert_with(Vec::new)
+                    .push(note.clone());
 
-                    // Prepare for database
-                    db_notes.push((
-                        *wallet_id,
-                        hex::encode(note.nullifier),
-                        note.value_zatoshis,
-                        note.block_height,
-                        note.tx_hash.clone(),
-                        note.position as u32,
-                        note.memo.clone(),
-                    ));
-                    break;
+                // Prepare for database
+                db_notes.push((
+                    wallet_id,
+                    hex::encode(note.nullifier),
+                    note.value_zatoshis,
+                    note.block_height,
+                    note.tx_hash.clone(),
+                    note.position as u32,
+                    note.memo.clone(),
+                ));
+            } else {
+                // Fallback: find wallet_id by account_index (legacy behavior)
+                for (wallet_id, vk) in keys.iter() {
+                    if vk.account_index == note.account_id {
+                        notes_by_wallet
+                            .entry(*wallet_id)
+                            .or_insert_with(Vec::new)
+                            .push(note.clone());
+
+                        db_notes.push((
+                            *wallet_id,
+                            hex::encode(note.nullifier),
+                            note.value_zatoshis,
+                            note.block_height,
+                            note.tx_hash.clone(),
+                            note.position as u32,
+                            note.memo.clone(),
+                        ));
+                        break;
+                    }
                 }
             }
         }

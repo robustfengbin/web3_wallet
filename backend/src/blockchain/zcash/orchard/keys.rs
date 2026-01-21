@@ -20,6 +20,8 @@ pub struct OrchardViewingKey {
     pub account_index: u32,
     /// Birthday height (first block to scan from)
     pub birthday_height: u64,
+    /// Wallet ID (set when registered with sync service)
+    pub wallet_id: Option<i32>,
 }
 
 impl OrchardViewingKey {
@@ -29,7 +31,14 @@ impl OrchardViewingKey {
             fvk,
             account_index,
             birthday_height,
+            wallet_id: None,
         }
+    }
+
+    /// Set wallet ID (called when registering with sync service)
+    pub fn with_wallet_id(mut self, wallet_id: i32) -> Self {
+        self.wallet_id = Some(wallet_id);
+        self
     }
 
     /// Get the full viewing key
@@ -110,6 +119,7 @@ impl OrchardViewingKey {
             fvk,
             account_index,
             birthday_height,
+            wallet_id: None,
         })
     }
 }

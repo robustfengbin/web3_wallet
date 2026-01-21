@@ -95,7 +95,10 @@ pub struct OrchardNote {
     /// Unique note ID (internal)
     pub id: Option<i64>,
 
-    /// Account ID this note belongs to
+    /// Wallet ID this note belongs to (for multi-wallet support)
+    pub wallet_id: Option<i32>,
+
+    /// Account ID this note belongs to (legacy, kept for compatibility)
     pub account_id: u32,
 
     /// Transaction hash where this note was received
@@ -556,6 +559,7 @@ impl OrchardScanner {
 
                 return Some(OrchardNote {
                     id: None,
+                    wallet_id: viewing_key.wallet_id,
                     account_id: viewing_key.account_index,
                     tx_hash: tx_hash.to_string(),
                     block_height,
