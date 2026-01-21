@@ -17,7 +17,8 @@
     "optional": "Optional",
     "recommended": "Recommended",
     "max": "Max",
-    "enabling": "Enabling..."
+    "enabling": "Enabling...",
+    "close": "Close"
   },
   "login": {
     "title": "Web3 Wallet Service",
@@ -79,6 +80,8 @@
     "deleteSuccess": "Wallet deleted successfully",
     "activeSuccess": "Wallet set as active",
     "copiedToClipboard": "Copied to clipboard",
+    "copied": "Copied!",
+    "copyFailed": "Failed to copy to clipboard",
     "confirmDelete": "Are you sure you want to delete this wallet?",
     "exportKeyTitle": "Export Private Key",
     "exportKeyWarning": "Warning: Your private key gives full control over your wallet. Never share it with anyone.",
@@ -185,6 +188,8 @@
     "failed": "Failed"
   },
   "zcash": {
+    "transparentBalance": "Transparent",
+    "shieldedBalance": "Shielded",
     "transfer": {
       "transparent": "Transparent Transfer",
       "privacy": "Privacy Transfer",
@@ -223,6 +228,13 @@
       "estimatedTime": "Est. time",
       "notesFound": "Notes found",
       "chainTip": "Chain tip",
+      "viewNotes": "View notes",
+      "privacyNotes": "Privacy Notes",
+      "noNotes": "No privacy notes found",
+      "notesCount": "{{count}} unspent note(s)",
+      "txHash": "TX",
+      "memo": "Memo",
+      "totalShielded": "Total Shielded",
       "selectWallet": "Select Wallet",
       "noWallets": "No Zcash Wallets",
       "createWalletPrompt": "Create a Zcash wallet to use privacy transfers.",
@@ -258,6 +270,31 @@
         "insufficientBalance": "Insufficient shielded balance",
         "insufficientSourceBalance": "Insufficient {{source}} balance"
       }
+    },
+    "confirm": {
+      "title": "Confirm Transfer",
+      "recipient": "Recipient",
+      "amount": "Amount",
+      "fee": "Network Fee",
+      "total": "Total Cost",
+      "fundSource": "Fund Source",
+      "type": "Transfer Type",
+      "memo": "Encrypted Memo",
+      "sourceShielded": "Shielded Balance",
+      "sourceTransparent": "Transparent Balance",
+      "sourceAuto": "Auto (Best Available)",
+      "shielding": "Shielding (T→Z)",
+      "private": "Private (Z→Z)",
+      "excessiveFeeWarning": "Excessive Fee Detected!",
+      "excessiveFeeDesc": "The fee is unusually high ({{percent}}% of total). This may indicate an error. Please verify before confirming.",
+      "highFeeWarning": "Higher Than Usual Fee",
+      "highFeeDesc": "The fee ({{percent}}%) is higher than typical. This is normal for complex transactions.",
+      "privacyProtected": "Privacy Protected",
+      "privacyDesc": "This transaction uses zero-knowledge proofs. Amount, sender, and recipient are encrypted.",
+      "expiryInfo": "Transaction expires at block {{height}}",
+      "executing": "Sending...",
+      "confirmAnyway": "Send Anyway",
+      "confirm": "Confirm & Send"
     }
   }
 }

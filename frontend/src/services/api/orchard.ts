@@ -20,6 +20,7 @@ import type {
   OrchardTransferResponse,
   ScanProgress,
   ShieldedBalance,
+  StoredOrchardNote,
   UnifiedAddressInfo,
 } from '../../types/orchard';
 
@@ -72,6 +73,15 @@ export async function getCombinedBalance(
   walletId: number
 ): Promise<CombinedZcashBalance> {
   return axios.get(`/wallets/${walletId}/orchard/balance/combined`);
+}
+
+/**
+ * Get unspent notes for a wallet
+ */
+export async function getUnspentNotes(
+  walletId: number
+): Promise<StoredOrchardNote[]> {
+  return axios.get(`/wallets/${walletId}/orchard/notes`);
 }
 
 /**
@@ -178,6 +188,7 @@ const orchardApi = {
   generateUnifiedAddress,
   getShieldedBalance,
   getCombinedBalance,
+  getUnspentNotes,
   initiateOrchardTransfer,
   executeOrchardTransfer,
   getOrchardTransactions,

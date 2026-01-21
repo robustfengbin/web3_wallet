@@ -2,6 +2,8 @@
 //!
 //! Builds shielded transactions using the Orchard protocol with Halo 2 proofs.
 
+#![allow(dead_code)]
+
 use super::{
     constants::{DEFAULT_FEE_ZATOSHIS, GRACE_ACTIONS, MARGINAL_FEE_ZATOSHIS},
     keys::OrchardSpendingKey,

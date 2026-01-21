@@ -3,20 +3,20 @@
 //! This module provides support for Zcash's Orchard shielded pool,
 //! using the Halo 2 proving system for trustless privacy.
 
+#![allow(dead_code)]
+
 pub mod address;
 pub mod builder;
 pub mod keys;
 pub mod scanner;
+pub mod sync;
 pub mod transfer;
 
-pub use address::{OrchardAddressManager, UnifiedAddressInfo};
+pub use address::UnifiedAddressInfo;
 pub use builder::{OrchardTransactionBuilder, OrchardTransferParams};
-pub use keys::{OrchardKeyManager, OrchardSpendingKey, OrchardViewingKey};
-pub use scanner::{OrchardNote, OrchardScanner, ScanProgress, ShieldedBalance};
-pub use transfer::{
-    FundSource, NetworkType, OrchardTransferService, TransferProposal, TransferRequest,
-    TransferResult, TransferStatus, TransparentInput,
-};
+pub use keys::OrchardViewingKey;
+pub use scanner::ScanProgress;
+pub use transfer::init_proving_key;
 
 /// Orchard protocol constants
 pub mod constants {

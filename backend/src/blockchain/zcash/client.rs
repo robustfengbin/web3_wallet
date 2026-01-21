@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use async_trait::async_trait;
 use reqwest::Proxy;
 use rust_decimal::Decimal;
@@ -5,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use tokio::sync::RwLock;
 
-use crate::blockchain::traits::{ChainClient, GasEstimate, TokenBalance, TransferParams, TxStatus};
+use crate::blockchain::traits::{ChainClient, GasEstimate, TokenBalance, TransferParams, TxStatus, Utxo};
 use crate::blockchain::zcash::orchard::{
     keys::OrchardKeyManager, scanner::{OrchardScanner, ShieldedBalance}, OrchardTransactionBuilder,
     OrchardTransferParams, OrchardViewingKey, ScanProgress, ShieldedPool,
@@ -118,6 +120,39 @@ struct GetBlockResult {
 
 #[derive(Debug, Deserialize)]
 struct EstimateFeeResult(f64);
+
+/// z_sendmany recipient entry
+#[derive(Debug, Clone, Serialize)]
+struct ZSendManyRecipient {
+    address: String,
+    amount: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memo: Option<String>,
+}
+
+/// z_getoperationstatus result
+#[derive(Debug, Clone, Deserialize)]
+struct ZOperationStatus {
+    id: String,
+    status: String,
+    #[serde(default)]
+    result: Option<ZOperationResult>,
+    #[serde(default)]
+    error: Option<ZOperationError>,
+}
+
+/// z_getoperationstatus result data
+#[derive(Debug, Clone, Deserialize)]
+struct ZOperationResult {
+    txid: String,
+}
+
+/// z_getoperationstatus error data
+#[derive(Debug, Clone, Deserialize)]
+struct ZOperationError {
+    code: i32,
+    message: String,
+}
 
 impl ZcashClient {
     /// Create a reqwest client with optional proxy and basic auth support
@@ -360,6 +395,122 @@ impl ZcashClient {
 
         tracing::debug!("Found {} UTXOs for address {}", utxos.len(), address);
         Ok(utxos)
+    }
+
+    /// Send shielded transaction using z_sendmany RPC
+    /// This is the proper way to send privacy transactions via zcashd
+    ///
+    /// # Arguments
+    /// * `from_address` - Source address (transparent t1.., unified u1.., or shielded zs..)
+    /// * `to_address` - Destination address
+    /// * `amount_zec` - Amount in ZEC
+    /// * `memo` - Optional encrypted memo (for shielded recipients)
+    ///
+    /// # Returns
+    /// * Transaction ID on success
+    pub async fn z_sendmany(
+        &self,
+        from_address: &str,
+        to_address: &str,
+        amount_zec: f64,
+        memo: Option<String>,
+    ) -> AppResult<String> {
+        // Build recipient list
+        let recipients = vec![ZSendManyRecipient {
+            address: to_address.to_string(),
+            amount: amount_zec,
+            memo: memo.map(|m| hex::encode(m.as_bytes())), // Memo must be hex-encoded
+        }];
+
+        // Call z_sendmany with:
+        // - from_address
+        // - recipients array
+        // - minconf (1 = require 1 confirmation)
+        // - fee (null = use default)
+        // - privacyPolicy ("AllowRevealedSenders" allows transparent -> shielded)
+        let opid: String = self
+            .rpc_call(
+                "z_sendmany",
+                (
+                    from_address,
+                    &recipients,
+                    1,                              // minconf
+                    serde_json::Value::Null,        // fee (default)
+                    "AllowRevealedSenders",         // privacy policy for t->z transfers
+                ),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("z_sendmany RPC failed: {}", e);
+                e
+            })?;
+
+        tracing::info!("z_sendmany operation started: {}", opid);
+
+        // Wait for operation to complete
+        self.wait_for_operation(&opid).await
+    }
+
+    /// Wait for a z_* operation to complete and return the txid
+    async fn wait_for_operation(&self, opid: &str) -> AppResult<String> {
+        let max_attempts = 120; // Wait up to 2 minutes
+        let poll_interval = std::time::Duration::from_secs(1);
+
+        for attempt in 0..max_attempts {
+            let statuses: Vec<ZOperationStatus> = self
+                .rpc_call("z_getoperationstatus", (vec![opid],))
+                .await?;
+
+            if let Some(status) = statuses.first() {
+                match status.status.as_str() {
+                    "success" => {
+                        if let Some(ref result) = status.result {
+                            tracing::info!(
+                                "z_sendmany operation {} succeeded: txid={}",
+                                opid,
+                                result.txid
+                            );
+                            return Ok(result.txid.clone());
+                        } else {
+                            return Err(AppError::BlockchainError(
+                                "Operation succeeded but no txid returned".to_string(),
+                            ));
+                        }
+                    }
+                    "failed" => {
+                        let error_msg = status
+                            .error
+                            .as_ref()
+                            .map(|e| e.message.clone())
+                            .unwrap_or_else(|| "Unknown error".to_string());
+                        tracing::error!("z_sendmany operation {} failed: {}", opid, error_msg);
+                        return Err(AppError::BlockchainError(format!(
+                            "Shielded transfer failed: {}",
+                            error_msg
+                        )));
+                    }
+                    "executing" | "queued" => {
+                        tracing::debug!(
+                            "z_sendmany operation {} status: {} (attempt {}/{})",
+                            opid,
+                            status.status,
+                            attempt + 1,
+                            max_attempts
+                        );
+                    }
+                    other => {
+                        tracing::warn!("Unknown operation status: {}", other);
+                    }
+                }
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
+
+        Err(AppError::BlockchainError(format!(
+            "Timeout waiting for operation {} to complete",
+            opid
+        )))
     }
 
     /// Get current block height using getblockcount
@@ -942,5 +1093,46 @@ impl ChainClient for ZcashClient {
 
     async fn broadcast_raw_transaction(&self, raw_tx_hex: &str) -> AppResult<String> {
         self.send_raw_transaction(raw_tx_hex).await
+    }
+
+    async fn get_utxos(&self, address: &str) -> AppResult<Vec<Utxo>> {
+        let utxos = self.get_address_utxos(address).await?;
+        Ok(utxos
+            .into_iter()
+            .map(|u| Utxo {
+                txid: u.txid,
+                output_index: u.output_index,
+                script: u.script,
+                value: u.satoshis,
+                height: u.height,
+            })
+            .collect())
+    }
+
+    async fn send_shielded(
+        &self,
+        from_address: &str,
+        to_address: &str,
+        amount: Decimal,
+        memo: Option<String>,
+    ) -> AppResult<String> {
+        let amount_f64: f64 = amount
+            .to_string()
+            .parse()
+            .map_err(|_| AppError::ValidationError("Invalid amount".to_string()))?;
+
+        self.z_sendmany(from_address, to_address, amount_f64, memo).await
+    }
+
+    async fn get_rpc_url(&self) -> Option<String> {
+        Some(self.rpc_settings.read().await.primary_rpc.clone())
+    }
+
+    async fn get_rpc_auth(&self) -> Option<(String, String)> {
+        let settings = self.rpc_settings.read().await;
+        match (&settings.rpc_user, &settings.rpc_password) {
+            (Some(user), Some(pass)) => Some((user.clone(), pass.clone())),
+            _ => None,
+        }
     }
 }

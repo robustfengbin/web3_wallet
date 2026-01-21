@@ -1,8 +1,13 @@
+#![allow(dead_code)]
+
 use std::sync::Arc;
+use tokio::sync::RwLock;
+use sqlx::MySqlPool;
 
 use crate::blockchain::zcash::orchard::{
     keys::OrchardKeyManager,
     scanner::ShieldedBalance,
+    sync::{OrchardSyncService, SyncConfig},
     transfer::{FundSource, NetworkType, OrchardTransferService, TransferProposal, TransferResult},
     ScanProgress, ShieldedPool, UnifiedAddressInfo,
 };
@@ -23,6 +28,10 @@ pub struct WalletService {
     wallet_repo: WalletRepository,
     chain_registry: Arc<ChainRegistry>,
     security_config: SecurityConfig,
+    /// Orchard sync service for scanning shielded transactions
+    orchard_sync: Arc<RwLock<Option<OrchardSyncService>>>,
+    /// Database pool for persistence
+    db_pool: MySqlPool,
 }
 
 impl WalletService {
@@ -30,18 +39,68 @@ impl WalletService {
         wallet_repo: WalletRepository,
         chain_registry: Arc<ChainRegistry>,
         security_config: SecurityConfig,
+        db_pool: MySqlPool,
     ) -> Self {
         Self {
             wallet_repo,
             chain_registry,
             security_config,
+            orchard_sync: Arc::new(RwLock::new(None)),
+            db_pool,
         }
+    }
+
+    /// Initialize Orchard sync service with RPC configuration and database persistence
+    pub async fn init_orchard_sync(&self, rpc_url: &str, rpc_user: Option<&str>, rpc_password: Option<&str>) -> AppResult<()> {
+        let config = SyncConfig {
+            rpc_url: rpc_url.to_string(),
+            rpc_user: rpc_user.map(|s| s.to_string()),
+            rpc_password: rpc_password.map(|s| s.to_string()),
+            batch_size: 500,  // Process 500 blocks per scan round
+            birthday_height: 1_687_104, // Orchard activation height
+            parallel_fetches: 25,  // 25 blocks per batch (20 parallel batches)
+        };
+
+        // Use new_with_db for database persistence
+        let sync_service = OrchardSyncService::new_with_db(config, self.db_pool.clone());
+
+        // Register all existing Zcash wallets with Orchard enabled
+        let wallets = self.wallet_repo.list_all().await?;
+        for wallet in wallets {
+            if wallet.chain == "zcash" {
+                if let Ok(vk) = self.get_viewing_key_for_wallet(&wallet).await {
+                    sync_service.register_wallet(wallet.id, vk).await;
+                }
+            }
+        }
+
+        let mut orchard_sync = self.orchard_sync.write().await;
+        *orchard_sync = Some(sync_service);
+
+        tracing::info!("Orchard sync service initialized");
+        Ok(())
+    }
+
+    /// Get viewing key for a wallet
+    async fn get_viewing_key_for_wallet(&self, wallet: &Wallet) -> AppResult<crate::blockchain::zcash::orchard::OrchardViewingKey> {
+        let private_key = decrypt(
+            &wallet.encrypted_private_key,
+            &self.security_config.encryption_key,
+        )?;
+
+        // Use stored birthday_height, fallback to Orchard activation height if not set
+        let birthday_height = wallet.orchard_birthday_height.unwrap_or(1_687_104);
+
+        let (_, viewing_key) = OrchardKeyManager::derive_from_private_key(&private_key, 0, birthday_height)
+            .map_err(|e| AppError::InternalError(format!("Failed to derive viewing key: {}", e)))?;
+
+        Ok(viewing_key)
     }
 
     /// Create a new wallet with generated private key
     pub async fn create_wallet(&self, name: &str, chain: &str) -> AppResult<WalletResponse> {
         // Verify chain is supported
-        self.chain_registry.get(chain)?;
+        let chain_client = self.chain_registry.get(chain)?;
 
         // Generate wallet based on chain type
         let (address, private_key) = match chain {
@@ -57,17 +116,32 @@ impl WalletService {
             )));
         }
 
+        // For Zcash wallets, get current block height as birthday
+        let orchard_birthday_height = if chain == "zcash" {
+            match chain_client.get_block_height().await {
+                Ok(height) => {
+                    tracing::info!("New Zcash wallet birthday_height set to {}", height);
+                    Some(height)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to get block height for birthday, using None: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Encrypt private key
         let encrypted_key = encrypt(&private_key, &self.security_config.encryption_key)?;
 
-        // Store wallet
+        // Store wallet with birthday height
         let id = self
             .wallet_repo
-            .create(name, &address, &encrypted_key, chain)
+            .create(name, &address, &encrypted_key, chain, orchard_birthday_height)
             .await?;
 
         // Import address into chain node for tracking (needed for UTXO-based chains like Zcash)
-        let chain_client = self.chain_registry.get(chain)?;
         if let Err(e) = chain_client.import_address_for_tracking(&address, name).await {
             tracing::warn!("Failed to import address for tracking: {}", e);
             // Don't fail wallet creation, just warn
@@ -90,7 +164,7 @@ impl WalletService {
         chain: &str,
     ) -> AppResult<WalletResponse> {
         // Verify chain is supported
-        self.chain_registry.get(chain)?;
+        let chain_client = self.chain_registry.get(chain)?;
 
         // Parse and validate private key based on chain type
         let key = private_key.strip_prefix("0x").unwrap_or(private_key);
@@ -108,17 +182,33 @@ impl WalletService {
             )));
         }
 
+        // For Zcash wallets, get current block height as birthday
+        // Note: For imported wallets, user may want to set an earlier birthday to scan historical transactions
+        let orchard_birthday_height = if chain == "zcash" {
+            match chain_client.get_block_height().await {
+                Ok(height) => {
+                    tracing::info!("Imported Zcash wallet birthday_height set to {}", height);
+                    Some(height)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to get block height for birthday, using None: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Encrypt private key
         let encrypted_key = encrypt(key, &self.security_config.encryption_key)?;
 
-        // Store wallet
+        // Store wallet with birthday height
         let id = self
             .wallet_repo
-            .create(name, &address, &encrypted_key, chain)
+            .create(name, &address, &encrypted_key, chain, orchard_birthday_height)
             .await?;
 
         // Import address into chain node for tracking (needed for UTXO-based chains like Zcash)
-        let chain_client = self.chain_registry.get(chain)?;
         if let Err(e) = chain_client.import_address_for_tracking(&address, name).await {
             tracing::warn!("Failed to import address for tracking: {}", e);
             // Don't fail wallet import, just warn
@@ -327,9 +417,11 @@ impl WalletService {
             &self.security_config.encryption_key,
         )?;
 
+        // Use stored birthday_height, fallback to Orchard activation height
+        let birthday_height = wallet.orchard_birthday_height.unwrap_or(1_687_104);
+
         // Try to regenerate the unified address (deterministic from private key)
-        // Use a standard birthday height for regeneration
-        match enable_orchard_for_wallet(&private_key, 2000000) {
+        match enable_orchard_for_wallet(&private_key, birthday_height) {
             Ok((unified_address, _viewing_key)) => Ok(vec![unified_address]),
             Err(_) => {
                 // Orchard not enabled or error - return empty list
@@ -356,8 +448,7 @@ impl WalletService {
 
     /// Get shielded (Orchard) balance for a wallet
     ///
-    /// Note: Full balance tracking requires lightwalletd integration and block scanning.
-    /// This returns a placeholder balance for now.
+    /// This automatically syncs with the blockchain before returning the balance.
     ///
     /// # Arguments
     /// * `wallet_id` - ID of the wallet (must have Orchard enabled)
@@ -377,9 +468,81 @@ impl WalletService {
             ));
         }
 
-        // TODO: Implement actual balance retrieval from scanner
-        // For now, return zero balance since we haven't scanned any blocks
+        // Ensure sync service is initialized and sync before getting balance
+        self.ensure_orchard_sync_initialized().await?;
+
+        // Sync to get latest balance
+        if let Err(e) = self.sync_orchard_internal().await {
+            tracing::warn!("Failed to sync before getting balance: {}", e);
+            // Continue anyway to return cached balance
+        }
+
+        // Get balance from Orchard sync service
+        let orchard_sync = self.orchard_sync.read().await;
+        if let Some(sync_service) = orchard_sync.as_ref() {
+            let balance = sync_service.get_wallet_balance(wallet_id).await;
+            return Ok(balance);
+        }
+
+        // Fallback to zero if sync not initialized
         Ok(ShieldedBalance::new(ShieldedPool::Orchard, 0, 0, 0))
+    }
+
+    /// Get unspent notes from database
+    pub async fn get_unspent_notes_from_db(&self, wallet_id: i32) -> AppResult<Vec<crate::db::repositories::orchard_repo::StoredOrchardNote>> {
+        let wallet = self
+            .wallet_repo
+            .find_by_id(wallet_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Wallet not found".to_string()))?;
+
+        if wallet.chain != "zcash" {
+            return Err(AppError::ValidationError(
+                "Notes only available for Zcash wallets".to_string(),
+            ));
+        }
+
+        let repo = crate::db::repositories::OrchardRepository::new(self.db_pool.clone());
+        repo.get_unspent_notes(wallet_id).await
+    }
+
+    /// Ensure Orchard sync service is initialized
+    async fn ensure_orchard_sync_initialized(&self) -> AppResult<()> {
+        // Check if already initialized
+        {
+            let orchard_sync = self.orchard_sync.read().await;
+            if orchard_sync.is_some() {
+                return Ok(());
+            }
+        }
+
+        // Initialize sync service
+        tracing::info!("Auto-initializing Orchard sync service");
+
+        let chain_client = self.chain_registry.get("zcash")?;
+        let rpc_url = chain_client.get_rpc_url().await
+            .ok_or_else(|| AppError::InternalError("No RPC URL configured for Zcash".to_string()))?;
+        let rpc_auth = chain_client.get_rpc_auth().await;
+
+        let (rpc_user, rpc_password) = match rpc_auth {
+            Some((u, p)) => (Some(u), Some(p)),
+            None => (None, None),
+        };
+
+        self.init_orchard_sync(&rpc_url, rpc_user.as_deref(), rpc_password.as_deref()).await
+    }
+
+    /// Internal sync method that doesn't re-initialize
+    async fn sync_orchard_internal(&self) -> AppResult<ScanProgress> {
+        let orchard_sync = self.orchard_sync.read().await;
+
+        if let Some(sync_service) = orchard_sync.as_ref() {
+            let progress = sync_service.sync().await
+                .map_err(|e| AppError::BlockchainError(format!("Sync failed: {}", e)))?;
+            Ok(progress)
+        } else {
+            Err(AppError::InternalError("Orchard sync not initialized".to_string()))
+        }
     }
 
     /// Get combined balance (transparent + shielded) for a Zcash wallet
@@ -435,24 +598,70 @@ impl WalletService {
         })
     }
 
-    /// Get Orchard scan progress
-    ///
-    /// Note: Full scanner functionality requires lightwalletd integration.
-    /// This returns a placeholder progress for now.
-    pub async fn get_scan_progress(&self) -> AppResult<ScanProgress> {
-        // TODO: Implement actual scan progress from lightwalletd
-        // Using placeholder values: birthday_height=2000000, chain_tip=2500000
-        Ok(ScanProgress::new("zcash", "orchard", 2000000, 2500000))
+    /// Trigger Orchard sync - scans blockchain for shielded transactions
+    pub async fn sync_orchard(&self) -> AppResult<ScanProgress> {
+        let orchard_sync = self.orchard_sync.read().await;
+
+        if let Some(sync_service) = orchard_sync.as_ref() {
+            tracing::info!("Starting Orchard blockchain sync");
+
+            let progress = sync_service.sync().await
+                .map_err(|e| AppError::BlockchainError(format!("Sync failed: {}", e)))?;
+
+            tracing::info!(
+                "Orchard sync complete: {} blocks scanned, {} notes found",
+                progress.last_scanned_height,
+                progress.notes_found
+            );
+
+            Ok(progress)
+        } else {
+            // Try to initialize sync service with default RPC
+            tracing::warn!("Orchard sync service not initialized, using default RPC");
+
+            // Get Zcash RPC config from chain registry
+            let chain_client = self.chain_registry.get("zcash")?;
+            let rpc_url = chain_client.get_rpc_url().await
+                .ok_or_else(|| AppError::InternalError("No RPC URL configured for Zcash".to_string()))?;
+            let rpc_auth = chain_client.get_rpc_auth().await;
+
+            drop(orchard_sync); // Release read lock before calling init
+
+            let (rpc_user, rpc_password) = match rpc_auth {
+                Some((u, p)) => (Some(u), Some(p)),
+                None => (None, None),
+            };
+
+            self.init_orchard_sync(&rpc_url, rpc_user.as_deref(), rpc_password.as_deref()).await?;
+
+            // Now try sync again
+            let orchard_sync = self.orchard_sync.read().await;
+            if let Some(sync_service) = orchard_sync.as_ref() {
+                let progress = sync_service.sync().await
+                    .map_err(|e| AppError::BlockchainError(format!("Sync failed: {}", e)))?;
+                Ok(progress)
+            } else {
+                Err(AppError::InternalError("Failed to initialize sync service".to_string()))
+            }
+        }
     }
 
-    /// Trigger Orchard sync
-    ///
-    /// Note: Full scanner functionality requires lightwalletd integration.
-    /// This returns a placeholder progress for now.
-    pub async fn sync_orchard(&self) -> AppResult<ScanProgress> {
-        // TODO: Implement actual Orchard sync with lightwalletd
-        tracing::info!("Orchard sync requested (not yet implemented)");
-        Ok(ScanProgress::new("zcash", "orchard", 2000000, 2500000))
+    /// Get current Orchard scan progress
+    pub async fn get_scan_progress(&self) -> AppResult<ScanProgress> {
+        let orchard_sync = self.orchard_sync.read().await;
+
+        if let Some(sync_service) = orchard_sync.as_ref() {
+            Ok(sync_service.get_progress().await)
+        } else {
+            // Return default progress if not initialized
+            let chain_tip = self.chain_registry.get("zcash")
+                .ok()
+                .map(|c| futures::executor::block_on(c.get_block_height()).unwrap_or(2_500_000))
+                .unwrap_or(2_500_000);
+
+            // Use Orchard activation height as default starting point
+            Ok(ScanProgress::new("zcash", "orchard", 1_687_104, chain_tip))
+        }
     }
 
     /// Parse a unified address
@@ -484,6 +693,7 @@ impl WalletService {
         wallet_id: i32,
         to_address: &str,
         amount_zec: &str,
+        amount_zatoshis: Option<u64>,
         memo: Option<String>,
         fund_source: FundSource,
     ) -> AppResult<TransferProposal> {
@@ -520,10 +730,16 @@ impl WalletService {
             wallet_id,
             to_address: to_address.to_string(),
             amount_zec: amount_zec.to_string(),
-            amount_zatoshis: None,
+            amount_zatoshis, // Pass through the zatoshis if provided
             memo,
             fund_source,
         };
+
+        tracing::debug!(
+            "Creating transfer proposal: amount_zec={}, amount_zatoshis={:?}",
+            amount_zec,
+            amount_zatoshis
+        );
 
         transfer_service
             .create_proposal(
@@ -549,6 +765,28 @@ impl WalletService {
         wallet_id: i32,
         proposal: &TransferProposal,
     ) -> AppResult<TransferResult> {
+        use crate::blockchain::zcash::orchard::keys::OrchardKeyManager;
+
+        // CRITICAL SAFETY CHECK: Prevent zero-value transactions
+        if proposal.amount_zatoshis == 0 {
+            tracing::error!(
+                "BLOCKED in execute_privacy_transfer: amount_zatoshis=0! proposal={}, to={}",
+                proposal.proposal_id,
+                proposal.to_address
+            );
+            return Err(AppError::ValidationError(
+                "Cannot execute transfer with zero amount".to_string(),
+            ));
+        }
+
+        tracing::info!(
+            "execute_privacy_transfer: wallet={}, proposal={}, amount={} zatoshis, fee={} zatoshis",
+            wallet_id,
+            proposal.proposal_id,
+            proposal.amount_zatoshis,
+            proposal.fee_zatoshis
+        );
+
         let wallet = self
             .wallet_repo
             .find_by_id(wallet_id)
@@ -567,51 +805,304 @@ impl WalletService {
             &self.security_config.encryption_key,
         )?;
 
-        // Derive Orchard spending key
+        // Use stored birthday_height, fallback to Orchard activation height
+        let birthday_height = wallet.orchard_birthday_height.unwrap_or(1_687_104);
+
+        // Derive Orchard spending key from private key
         let (spending_key, _viewing_key) =
-            OrchardKeyManager::derive_from_private_key(&private_key, 0, 2_000_000)
+            OrchardKeyManager::derive_from_private_key(&private_key, 0, birthday_height)
                 .map_err(|e| AppError::InternalError(format!("Failed to derive keys: {}", e)))?;
 
         // Create transfer service
         let transfer_service = OrchardTransferService::new(NetworkType::Mainnet);
 
-        // For shielded transfers, we need spendable notes from the scanner
-        // For transparent (shielding), we need UTXOs
-        // For now, we'll build with placeholder data since we don't have a real scanner
-
-        // Get chain client for broadcasting
+        // Get chain client for UTXOs and broadcasting
         let chain_client = self.chain_registry.get("zcash")?;
 
-        // Placeholder anchor - in real implementation, get from scanner
-        let anchor = [0u8; 32];
+        // Get transparent inputs (UTXOs) for shielding
+        // CRITICAL: Only select UTXOs needed to cover amount + fee, not ALL UTXOs!
+        // Otherwise excess funds become miner fees (no change output in current implementation)
+        let transparent_inputs = if proposal.fund_source == FundSource::Transparent
+            || proposal.is_shielding
+        {
+            let mut utxos = chain_client.get_utxos(&wallet.address).await?;
+            tracing::debug!("Found {} UTXOs for address {}", utxos.len(), wallet.address);
+
+            // Sort UTXOs by value descending to minimize number of inputs
+            utxos.sort_by(|a, b| b.value.cmp(&a.value));
+
+            // Calculate total needed (amount + fee)
+            let total_needed = proposal.amount_zatoshis + proposal.fee_zatoshis;
+            tracing::info!(
+                "Selecting UTXOs: need {} zatoshis (amount={} + fee={})",
+                total_needed,
+                proposal.amount_zatoshis,
+                proposal.fee_zatoshis
+            );
+
+            // Select only UTXOs needed to cover the total
+            let mut selected_utxos = Vec::new();
+            let mut selected_total: u64 = 0;
+
+            for utxo in utxos {
+                if selected_total >= total_needed {
+                    break; // We have enough
+                }
+
+                tracing::debug!(
+                    "Selecting UTXO: txid={}, vout={}, value={} zatoshis",
+                    utxo.txid,
+                    utxo.output_index,
+                    utxo.value
+                );
+
+                selected_total += utxo.value;
+
+                // Parse txid - stored in big-endian for display
+                let mut prev_tx_hash = [0u8; 32];
+                if let Ok(bytes) = hex::decode(&utxo.txid) {
+                    if bytes.len() == 32 {
+                        prev_tx_hash.copy_from_slice(&bytes);
+                    }
+                }
+                // This is the scriptPubKey (locking script), NOT the signature
+                let script_pubkey = hex::decode(&utxo.script).unwrap_or_default();
+
+                selected_utxos.push(crate::blockchain::zcash::orchard::transfer::TransparentInput {
+                    prev_tx_hash,
+                    prev_tx_index: utxo.output_index,
+                    script_pubkey,
+                    value: utxo.value,
+                    sequence: 0xfffffffe, // Enable RBF
+                });
+            }
+
+            // Recalculate fee based on actual input count
+            // ZIP-317: fee = 5000 * max(2, transparent_inputs + orchard_actions)
+            // Orchard actions = 2 (payment + change, padded to even)
+            let num_inputs = selected_utxos.len() as u64;
+            let orchard_actions: u64 = 2; // payment + change
+            let logical_actions = num_inputs + orchard_actions;
+            let actual_fee_needed = 5000 * std::cmp::max(2, logical_actions);
+
+            tracing::info!(
+                "ZIP-317 fee: inputs={}, orchard_actions={}, logical_actions={}, required_fee={}",
+                num_inputs,
+                orchard_actions,
+                logical_actions,
+                actual_fee_needed
+            );
+
+            // If actual fee > proposal fee, we need more funds
+            let effective_fee = std::cmp::max(proposal.fee_zatoshis, actual_fee_needed);
+            let total_needed_with_actual_fee = proposal.amount_zatoshis + effective_fee;
+
+            // Check if we need to select more UTXOs due to higher fee
+            if selected_total < total_needed_with_actual_fee {
+                tracing::warn!(
+                    "Need more funds due to higher fee: have={}, need={} (fee increased from {} to {})",
+                    selected_total,
+                    total_needed_with_actual_fee,
+                    proposal.fee_zatoshis,
+                    effective_fee
+                );
+                return Err(AppError::ValidationError(format!(
+                    "Insufficient balance after fee adjustment: have {} zatoshis, need {} zatoshis (fee: {})",
+                    selected_total, total_needed_with_actual_fee, effective_fee
+                )));
+            }
+
+            // Calculate change (will be sent to shielded change address)
+            let change_amount = selected_total - proposal.amount_zatoshis - effective_fee;
+
+            tracing::info!(
+                "Transaction breakdown: input={}, amount={}, fee={}, change={}",
+                selected_total,
+                proposal.amount_zatoshis,
+                effective_fee,
+                change_amount
+            );
+
+            // Update proposal fee if it increased (for accurate change calculation)
+            // Note: We can't mutate proposal here, but the fee will be recalculated in build_transaction
+            if effective_fee != proposal.fee_zatoshis {
+                tracing::warn!(
+                    "Fee adjusted from {} to {} zatoshis due to {} UTXOs",
+                    proposal.fee_zatoshis,
+                    effective_fee,
+                    num_inputs
+                );
+            }
+
+            selected_utxos
+        } else {
+            vec![]
+        };
+
+        // Get current block height for anchor
         let anchor_height = chain_client.get_block_height().await.unwrap_or(2_500_000);
 
-        // Build transaction
+        // Build the Orchard transaction (includes proof generation and signing)
         let result = transfer_service
             .build_transaction(
                 proposal,
                 &spending_key,
-                vec![], // No spendable notes yet (requires scanner)
-                vec![], // No transparent inputs yet (requires UTXO query)
+                &private_key, // Private key for signing transparent inputs
+                vec![],       // No spendable notes for shielding
+                transparent_inputs,
                 anchor_height,
-                anchor,
+                [0u8; 32], // Empty anchor - will use Anchor::empty_tree() internally
             )
-            .map_err(|e| AppError::BlockchainError(e.to_string()))?;
+            .map_err(|e| AppError::BlockchainError(format!("Failed to build transaction: {}", e)))?;
 
-        // Broadcast transaction if we have raw tx
+        // Broadcast using sendrawtransaction
         if let Some(ref raw_tx) = result.raw_tx {
-            match chain_client.broadcast_raw_transaction(raw_tx).await {
-                Ok(_) => {
-                    tracing::info!("Privacy transfer broadcast successful: {}", result.tx_id);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to broadcast transaction: {}", e);
-                    // Return result anyway since tx was built successfully
-                }
-            }
+            let tx_hash = chain_client
+                .broadcast_raw_transaction(raw_tx)
+                .await
+                .map_err(|e| {
+                    AppError::BlockchainError(format!("Failed to broadcast transaction: {}", e))
+                })?;
+
+            tracing::info!(
+                "Privacy transfer broadcast successful: wallet={}, to={}, tx_hash={}",
+                wallet_id,
+                proposal.to_address,
+                tx_hash
+            );
+
+            return Ok(TransferResult {
+                tx_id: tx_hash,
+                status: crate::blockchain::zcash::orchard::transfer::TransferStatus::Submitted,
+                raw_tx: result.raw_tx,
+                amount_zatoshis: proposal.amount_zatoshis,
+                fee_zatoshis: proposal.fee_zatoshis,
+            });
         }
 
         Ok(result)
+    }
+
+    /// Start background Orchard sync task
+    ///
+    /// This spawns a background task that syncs all Zcash wallets every 5 minutes.
+    /// Should be called once at application startup.
+    pub fn start_background_sync(self: Arc<Self>) {
+        let service = self.clone();
+
+        tokio::spawn(async move {
+            // Wait 30 seconds before first sync to allow system to fully start
+            tracing::info!("[Background Sync] Waiting 30s before first sync...");
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+            tracing::info!("[Background Sync] ▶️ Starting Orchard background sync task (interval: 5 minutes)");
+
+            let mut sync_count = 0u64;
+            loop {
+                sync_count += 1;
+                tracing::info!("[Background Sync] ═══════════════════════════════════════════════════");
+                tracing::info!("[Background Sync] Starting sync cycle #{}", sync_count);
+
+                // Perform sync for all Zcash wallets
+                let start_time = std::time::Instant::now();
+                match service.sync_all_zcash_wallets().await {
+                    Ok(count) => {
+                        let elapsed = start_time.elapsed().as_secs_f64();
+                        tracing::info!(
+                            "[Background Sync] ✅ Sync cycle #{} completed: {} wallets synced in {:.1}s",
+                            sync_count,
+                            count,
+                            elapsed
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("[Background Sync] ❌ Sync cycle #{} failed: {}", sync_count, e);
+                    }
+                }
+
+                tracing::info!("[Background Sync] Next sync in 5 minutes...");
+                tracing::info!("[Background Sync] ═══════════════════════════════════════════════════");
+
+                // Wait 5 minutes before next sync
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            }
+        });
+    }
+
+    /// Sync all Zcash wallets
+    async fn sync_all_zcash_wallets(&self) -> AppResult<usize> {
+        tracing::debug!("[Wallet Sync] Ensuring Orchard sync service is initialized...");
+
+        // Ensure sync service is initialized
+        self.ensure_orchard_sync_initialized().await?;
+
+        // Get all Zcash wallets
+        let wallets = self.wallet_repo.list_by_chain("zcash").await?;
+        let wallet_count = wallets.len();
+
+        if wallet_count == 0 {
+            tracing::info!("[Wallet Sync] No Zcash wallets found in database");
+            return Ok(0);
+        }
+
+        tracing::info!("[Wallet Sync] Found {} Zcash wallet(s) to sync", wallet_count);
+
+        // Register all wallets with the sync service
+        let mut registered_count = 0usize;
+        let mut failed_count = 0usize;
+        {
+            let orchard_sync = self.orchard_sync.read().await;
+            if let Some(sync_service) = orchard_sync.as_ref() {
+                for wallet in &wallets {
+                    match self.get_viewing_key_for_wallet(wallet).await {
+                        Ok(vk) => {
+                            sync_service.register_wallet(wallet.id, vk).await;
+                            registered_count += 1;
+                            tracing::debug!(
+                                "[Wallet Sync] Registered wallet {} (address: {})",
+                                wallet.id,
+                                &wallet.address[..20]
+                            );
+                        }
+                        Err(e) => {
+                            failed_count += 1;
+                            tracing::warn!(
+                                "[Wallet Sync] Failed to get viewing key for wallet {}: {}",
+                                wallet.id,
+                                e
+                            );
+                        }
+                    }
+                }
+            } else {
+                tracing::error!("[Wallet Sync] Orchard sync service not available!");
+            }
+        }
+
+        tracing::info!(
+            "[Wallet Sync] Registered {}/{} wallets ({} failed)",
+            registered_count,
+            wallet_count,
+            failed_count
+        );
+
+        // Perform sync
+        tracing::info!("[Wallet Sync] Starting blockchain scan...");
+        match self.sync_orchard_internal().await {
+            Ok(progress) => {
+                tracing::info!(
+                    "[Wallet Sync] Scan result: {:.1}% complete, scanned to block {}, {} notes found",
+                    progress.progress_percent,
+                    progress.last_scanned_height,
+                    progress.notes_found
+                );
+            }
+            Err(e) => {
+                tracing::warn!("[Wallet Sync] Scan error: {}", e);
+            }
+        }
+
+        Ok(wallet_count)
     }
 }
 

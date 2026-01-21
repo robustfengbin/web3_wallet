@@ -17,7 +17,8 @@
     "optional": "可选",
     "recommended": "推荐",
     "max": "最大值",
-    "enabling": "启用中..."
+    "enabling": "启用中...",
+    "close": "关闭"
   },
   "login": {
     "title": "Web3 钱包管理系统",
@@ -79,6 +80,8 @@
     "deleteSuccess": "钱包删除成功",
     "activeSuccess": "已设为活跃钱包",
     "copiedToClipboard": "已复制到剪贴板",
+    "copied": "已复制！",
+    "copyFailed": "复制失败",
     "confirmDelete": "确定要删除此钱包吗？",
     "exportKeyTitle": "导出私钥",
     "exportKeyWarning": "警告：私钥可完全控制您的钱包。请勿与他人分享。",
@@ -185,6 +188,8 @@
     "failed": "失败"
   },
   "zcash": {
+    "transparentBalance": "透明",
+    "shieldedBalance": "隐私",
     "transfer": {
       "transparent": "透明转账",
       "privacy": "隐私转账",
@@ -223,6 +228,13 @@
       "estimatedTime": "预计时间",
       "notesFound": "发现票据",
       "chainTip": "链顶端",
+      "viewNotes": "查看票据",
+      "privacyNotes": "隐私票据明细",
+      "noNotes": "暂无隐私票据",
+      "notesCount": "{{count}} 个未花费票据",
+      "txHash": "交易",
+      "memo": "备注",
+      "totalShielded": "隐私余额总计",
       "selectWallet": "选择钱包",
       "noWallets": "没有 Zcash 钱包",
       "createWalletPrompt": "创建 Zcash 钱包以使用隐私转账功能。",
@@ -258,6 +270,31 @@
         "insufficientBalance": "隐私余额不足",
         "insufficientSourceBalance": "{{source}}余额不足"
       }
+    },
+    "confirm": {
+      "title": "确认转账",
+      "recipient": "接收地址",
+      "amount": "转账金额",
+      "fee": "网络手续费",
+      "total": "总花费",
+      "fundSource": "资金来源",
+      "type": "转账类型",
+      "memo": "加密备注",
+      "sourceShielded": "隐私余额",
+      "sourceTransparent": "透明余额",
+      "sourceAuto": "自动（最优选择）",
+      "shielding": "隐蔽操作 (T→Z)",
+      "private": "隐私转账 (Z→Z)",
+      "excessiveFeeWarning": "检测到异常高额手续费！",
+      "excessiveFeeDesc": "手续费异常偏高（占总额 {{percent}}%）。这可能表示存在错误，请在确认前仔细核实。",
+      "highFeeWarning": "手续费高于通常水平",
+      "highFeeDesc": "手续费（{{percent}}%）高于平均水平。对于复杂交易这是正常的。",
+      "privacyProtected": "隐私保护已启用",
+      "privacyDesc": "此交易使用零知识证明。金额、发送方和接收方均已加密。",
+      "expiryInfo": "交易将在区块 {{height}} 过期",
+      "executing": "发送中...",
+      "confirmAnyway": "仍然发送",
+      "confirm": "确认并发送"
     }
   }
 }

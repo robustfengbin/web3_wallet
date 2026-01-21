@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use rand::RngCore;
 use ripemd::Ripemd160;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};

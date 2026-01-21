@@ -5,8 +5,15 @@
 //! - Sapling (Groth16)
 //! - Transparent (P2PKH)
 
+#![allow(dead_code)]
+
 use super::{keys::OrchardViewingKey, OrchardError, OrchardResult};
+use orchard::Address as OrchardAddress;
 use serde::{Deserialize, Serialize};
+use zcash_address::{
+    unified::{self, Container, Encoding, Receiver},
+    Network,
+};
 
 /// Information about a unified address
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,15 +78,16 @@ impl OrchardAddressManager {
 
     /// Generate a unified address at a specific index
     pub fn generate_address_at_index(&self, index: u32) -> OrchardResult<UnifiedAddressInfo> {
-        // Derive diversifier from index
-        let diversifier = self.derive_diversifier(index)?;
+        // Get the proper Orchard address from the viewing key
+        let orchard_address = self.viewing_key.address_at(index);
+        let orchard_receiver = orchard_address.to_raw_address_bytes();
 
-        // Generate receivers for each pool
-        let orchard_receiver = self.derive_orchard_receiver(&diversifier)?;
-        let sapling_receiver = self.derive_sapling_receiver(&diversifier)?;
+        // For Sapling and transparent, we still use placeholders
+        // In a full implementation, these would be derived from separate keys
+        let sapling_receiver = self.derive_sapling_receiver_placeholder(index)?;
         let transparent_address = self.derive_transparent_address(index)?;
 
-        // Encode as unified address (F4Jumble encoding)
+        // Encode as unified address
         let unified_address =
             self.encode_unified_address(&orchard_receiver, &sapling_receiver, &transparent_address)?;
 
@@ -96,8 +104,9 @@ impl OrchardAddressManager {
 
     /// Generate an Orchard-only unified address (maximum privacy)
     pub fn generate_orchard_only_address(&self, index: u32) -> OrchardResult<UnifiedAddressInfo> {
-        let diversifier = self.derive_diversifier(index)?;
-        let orchard_receiver = self.derive_orchard_receiver(&diversifier)?;
+        // Get the proper Orchard address from the viewing key
+        let orchard_address = self.viewing_key.address_at(index);
+        let orchard_receiver = orchard_address.to_raw_address_bytes();
 
         // Encode with only Orchard receiver
         let unified_address = self.encode_unified_address_single(&orchard_receiver, ReceiverType::Orchard)?;
@@ -159,62 +168,75 @@ impl OrchardAddressManager {
         Self::decode_unified_address(address).is_ok()
     }
 
-    /// Derive diversifier from index
-    fn derive_diversifier(&self, index: u32) -> OrchardResult<[u8; 11]> {
-        let mut hasher = blake2b_simd::Params::new()
-            .hash_length(11)
-            .personal(b"ZcashOrchardDiv")
-            .to_state();
-        hasher.update(self.viewing_key.fvk_bytes());
-        hasher.update(&index.to_le_bytes());
-        let result = hasher.finalize();
+    /// Extract Orchard address from a unified address
+    /// Returns the orchard::Address if the unified address contains an Orchard receiver
+    pub fn extract_orchard_address(address: &str) -> OrchardResult<OrchardAddress> {
+        let receivers = Self::decode_unified_address(address)?;
 
-        let mut diversifier = [0u8; 11];
-        diversifier.copy_from_slice(result.as_bytes());
-        Ok(diversifier)
+        // Find Orchard receiver (typecode 0x03, 43 bytes: 11 diversifier + 32 pk_d)
+        let orchard_data = receivers
+            .iter()
+            .find(|(t, _)| *t == ReceiverType::Orchard)
+            .map(|(_, data)| data)
+            .ok_or_else(|| {
+                OrchardError::InvalidUnifiedAddress(
+                    "Unified address does not contain an Orchard receiver".to_string(),
+                )
+            })?;
+
+        if orchard_data.len() != 43 {
+            return Err(OrchardError::InvalidUnifiedAddress(format!(
+                "Invalid Orchard receiver length: expected 43, got {}",
+                orchard_data.len()
+            )));
+        }
+
+        // Parse diversifier (11 bytes)
+        let mut diversifier_bytes = [0u8; 11];
+        diversifier_bytes.copy_from_slice(&orchard_data[..11]);
+        let _diversifier = orchard::keys::Diversifier::from_bytes(diversifier_bytes);
+
+        // Parse pk_d (32 bytes)
+        let mut pk_d_bytes = [0u8; 32];
+        pk_d_bytes.copy_from_slice(&orchard_data[11..43]);
+
+        // Convert to orchard::Address
+        OrchardAddress::from_raw_address_bytes(&orchard_data[..].try_into().unwrap())
+            .into_option()
+            .ok_or_else(|| {
+                OrchardError::InvalidUnifiedAddress("Invalid Orchard address encoding".to_string())
+            })
     }
 
-    /// Derive Orchard receiver from diversifier
-    fn derive_orchard_receiver(&self, diversifier: &[u8; 11]) -> OrchardResult<Vec<u8>> {
-        // In real implementation, this would:
-        // 1. Convert diversifier to point on Pallas curve
-        // 2. Derive receiver using the viewing key
-        let mut hasher = blake2b_simd::Params::new()
-            .hash_length(43) // Orchard receiver is 43 bytes
-            .personal(b"ZcashOrchardRcv")
-            .to_state();
-        hasher.update(self.viewing_key.fvk_bytes());
-        hasher.update(diversifier);
-        let result = hasher.finalize();
-
-        Ok(result.as_bytes().to_vec())
-    }
-
-    /// Derive Sapling receiver from diversifier
-    fn derive_sapling_receiver(&self, diversifier: &[u8; 11]) -> OrchardResult<Vec<u8>> {
+    /// Derive Sapling receiver placeholder from index
+    /// Note: This is a placeholder - real Sapling support would require separate Sapling keys
+    fn derive_sapling_receiver_placeholder(&self, index: u32) -> OrchardResult<Vec<u8>> {
         // Sapling receiver is 43 bytes
+        // This is a placeholder - real implementation would use Sapling keys
         let mut hasher = blake2b_simd::Params::new()
             .hash_length(43)
             .personal(b"ZcashSaplingRcv")
             .to_state();
-        hasher.update(self.viewing_key.fvk_bytes());
-        hasher.update(diversifier);
+        hasher.update(&self.viewing_key.fvk_bytes());
+        hasher.update(&index.to_le_bytes());
         let result = hasher.finalize();
 
         Ok(result.as_bytes().to_vec())
     }
 
     /// Derive transparent address from index
+    /// Note: This is a placeholder - real implementation would use transparent keys
     fn derive_transparent_address(&self, index: u32) -> OrchardResult<String> {
         use ripemd::Ripemd160;
         use sha2::{Digest, Sha256};
 
         // Derive public key hash for transparent address
+        // This is a placeholder - real implementation would use transparent keys
         let mut hasher = blake2b_simd::Params::new()
             .hash_length(33) // Compressed public key size
             .personal(b"ZcashOrchardTPK")
             .to_state();
-        hasher.update(self.viewing_key.fvk_bytes());
+        hasher.update(&self.viewing_key.fvk_bytes());
         hasher.update(&index.to_le_bytes());
         let pubkey = hasher.finalize();
 
@@ -233,111 +255,128 @@ impl OrchardAddressManager {
         Ok(bs58::encode(payload).into_string())
     }
 
-    /// Encode unified address from receivers
+    /// Encode unified address from receivers using the proper zcash_address crate
     fn encode_unified_address(
         &self,
         orchard_receiver: &[u8],
         sapling_receiver: &[u8],
         transparent_address: &str,
     ) -> OrchardResult<String> {
-        // Build the unified address payload
-        // Format: typecode || length || data for each receiver
-        let mut payload = Vec::new();
+        let mut receivers = Vec::new();
 
-        // Add Orchard receiver (typecode 0x03)
-        payload.push(0x03);
-        payload.push(orchard_receiver.len() as u8);
-        payload.extend_from_slice(orchard_receiver);
+        // Add Orchard receiver (43 bytes)
+        if orchard_receiver.len() == 43 {
+            let mut orchard_data = [0u8; 43];
+            orchard_data.copy_from_slice(orchard_receiver);
+            receivers.push(Receiver::Orchard(orchard_data));
+        }
 
-        // Add Sapling receiver (typecode 0x02)
-        payload.push(0x02);
-        payload.push(sapling_receiver.len() as u8);
-        payload.extend_from_slice(sapling_receiver);
+        // Add Sapling receiver (43 bytes)
+        if sapling_receiver.len() == 43 {
+            let mut sapling_data = [0u8; 43];
+            sapling_data.copy_from_slice(sapling_receiver);
+            receivers.push(Receiver::Sapling(sapling_data));
+        }
 
-        // Add transparent receiver (typecode 0x00 for P2PKH)
-        // Decode the t-address to get the pubkey hash
+        // Add transparent receiver (decode t-address to get pubkey hash)
         if let Ok(decoded) = bs58::decode(transparent_address).into_vec() {
             if decoded.len() >= 22 {
-                let pubkey_hash = &decoded[2..22];
-                payload.push(0x00);
-                payload.push(20);
-                payload.extend_from_slice(pubkey_hash);
+                let mut pubkey_hash = [0u8; 20];
+                pubkey_hash.copy_from_slice(&decoded[2..22]);
+                receivers.push(Receiver::P2pkh(pubkey_hash));
             }
         }
 
-        // Apply F4Jumble encoding and Bech32m
-        let jumbled = self.f4_jumble(&payload)?;
-        let address = self.bech32m_encode("u", &jumbled)?;
+        // Build unified address
+        let ua = unified::Address::try_from_items(receivers).map_err(|e| {
+            OrchardError::InvalidUnifiedAddress(format!("Failed to create unified address: {:?}", e))
+        })?;
+
+        // Encode for mainnet
+        let address = ua.encode(&Network::Main);
 
         Ok(address)
     }
 
-    /// Encode unified address with single receiver
+    /// Encode unified address with single receiver using the proper zcash_address crate
     fn encode_unified_address_single(
         &self,
         receiver: &[u8],
         receiver_type: ReceiverType,
     ) -> OrchardResult<String> {
-        let mut payload = Vec::new();
-
-        let typecode = match receiver_type {
-            ReceiverType::Orchard => 0x03,
-            ReceiverType::Sapling => 0x02,
-            ReceiverType::Transparent => 0x00,
+        let receivers = match receiver_type {
+            ReceiverType::Orchard => {
+                if receiver.len() != 43 {
+                    return Err(OrchardError::InvalidUnifiedAddress(
+                        "Orchard receiver must be 43 bytes".to_string(),
+                    ));
+                }
+                let mut data = [0u8; 43];
+                data.copy_from_slice(receiver);
+                vec![Receiver::Orchard(data)]
+            }
+            ReceiverType::Sapling => {
+                if receiver.len() != 43 {
+                    return Err(OrchardError::InvalidUnifiedAddress(
+                        "Sapling receiver must be 43 bytes".to_string(),
+                    ));
+                }
+                let mut data = [0u8; 43];
+                data.copy_from_slice(receiver);
+                vec![Receiver::Sapling(data)]
+            }
+            ReceiverType::Transparent => {
+                if receiver.len() != 20 {
+                    return Err(OrchardError::InvalidUnifiedAddress(
+                        "Transparent receiver must be 20 bytes".to_string(),
+                    ));
+                }
+                let mut data = [0u8; 20];
+                data.copy_from_slice(receiver);
+                vec![Receiver::P2pkh(data)]
+            }
         };
 
-        payload.push(typecode);
-        payload.push(receiver.len() as u8);
-        payload.extend_from_slice(receiver);
+        let ua = unified::Address::try_from_items(receivers).map_err(|e| {
+            OrchardError::InvalidUnifiedAddress(format!("Failed to create unified address: {:?}", e))
+        })?;
 
-        let jumbled = self.f4_jumble(&payload)?;
-        let address = self.bech32m_encode("u", &jumbled)?;
-
-        Ok(address)
+        Ok(ua.encode(&Network::Main))
     }
 
-    /// Decode unified address to receivers
+    /// Decode unified address to receivers using the proper zcash_address crate
     fn decode_unified_address(address: &str) -> OrchardResult<Vec<(ReceiverType, Vec<u8>)>> {
-        if !address.starts_with("u1") {
-            return Err(OrchardError::InvalidUnifiedAddress(
-                "Invalid prefix".to_string(),
-            ));
+        // Parse the unified address using zcash_address crate
+        let (network, ua) = unified::Address::decode(address).map_err(|e| {
+            OrchardError::InvalidUnifiedAddress(format!("Failed to decode address: {:?}", e))
+        })?;
+
+        // Check network (mainnet)
+        if network != Network::Main {
+            tracing::warn!("Address is for network {:?}, expected mainnet", network);
         }
 
-        // Bech32m decode
-        let data = Self::bech32m_decode(address)?;
-
-        // F4Jumble decode
-        let payload = Self::f4_jumble_inv(&data)?;
-
-        // Parse receivers
+        // Extract receivers
         let mut receivers = Vec::new();
-        let mut pos = 0;
 
-        while pos < payload.len() {
-            if pos + 2 > payload.len() {
-                break;
+        for receiver in ua.items() {
+            match receiver {
+                Receiver::Orchard(data) => {
+                    receivers.push((ReceiverType::Orchard, data.to_vec()));
+                }
+                Receiver::Sapling(data) => {
+                    receivers.push((ReceiverType::Sapling, data.to_vec()));
+                }
+                Receiver::P2pkh(data) => {
+                    receivers.push((ReceiverType::Transparent, data.to_vec()));
+                }
+                Receiver::P2sh(data) => {
+                    receivers.push((ReceiverType::Transparent, data.to_vec()));
+                }
+                _ => {
+                    // Unknown receiver type, skip
+                }
             }
-
-            let typecode = payload[pos];
-            let length = payload[pos + 1] as usize;
-            pos += 2;
-
-            if pos + length > payload.len() {
-                break;
-            }
-
-            let data = payload[pos..pos + length].to_vec();
-            pos += length;
-
-            let receiver_type = match typecode {
-                0x00 | 0x01 => ReceiverType::Transparent,
-                0x02 => ReceiverType::Sapling,
-                0x03 => ReceiverType::Orchard,
-                _ => continue, // Unknown receiver type
-            };
-
-            receivers.push((receiver_type, data));
         }
 
         if receivers.is_empty() {
@@ -362,161 +401,6 @@ impl OrchardAddressManager {
         bs58::encode(payload).into_string()
     }
 
-    /// F4Jumble encoding (simplified)
-    ///
-    /// F4Jumble is a length-preserving pseudorandom permutation used in unified addresses.
-    /// For inputs larger than 64 bytes (Blake2b max output), we generate the keystream
-    /// in 64-byte chunks.
-    fn f4_jumble(&self, input: &[u8]) -> OrchardResult<Vec<u8>> {
-        let keystream = Self::generate_keystream(input.len(), input, 0x00)?;
-
-        // XOR the input with the keystream
-        let mut result = input.to_vec();
-        for (i, byte) in result.iter_mut().enumerate() {
-            *byte ^= keystream[i];
-        }
-
-        Ok(result)
-    }
-
-    /// F4Jumble inverse
-    fn f4_jumble_inv(input: &[u8]) -> OrchardResult<Vec<u8>> {
-        let keystream = Self::generate_keystream(input.len(), input, 0x01)?;
-
-        // XOR with keystream to get original
-        let mut result = input.to_vec();
-        for (i, byte) in result.iter_mut().enumerate() {
-            *byte ^= keystream[i];
-        }
-
-        Ok(result)
-    }
-
-    /// Generate a keystream of the specified length using Blake2b
-    ///
-    /// For outputs larger than 64 bytes, we generate multiple 64-byte chunks
-    /// using a counter mode approach.
-    fn generate_keystream(length: usize, seed: &[u8], direction: u8) -> OrchardResult<Vec<u8>> {
-        let mut keystream = Vec::with_capacity(length);
-        let mut counter: u32 = 0;
-
-        while keystream.len() < length {
-            let chunk_size = std::cmp::min(64, length - keystream.len());
-
-            let mut hasher = blake2b_simd::Params::new()
-                .hash_length(chunk_size)
-                .personal(b"ZcashF4Jumble__")
-                .to_state();
-            hasher.update(seed);
-            hasher.update(&[direction]);
-            hasher.update(&counter.to_le_bytes());
-            let hash = hasher.finalize();
-
-            keystream.extend_from_slice(&hash.as_bytes()[..chunk_size]);
-            counter += 1;
-        }
-
-        Ok(keystream)
-    }
-
-    /// Bech32m encode
-    fn bech32m_encode(&self, hrp: &str, data: &[u8]) -> OrchardResult<String> {
-        // Convert to 5-bit groups
-        let mut bits = Vec::new();
-        for byte in data {
-            bits.push((byte >> 3) & 0x1f);
-            bits.push((byte << 2) & 0x1f);
-        }
-
-        // Remove trailing bits if necessary
-        while bits.len() > data.len() * 8 / 5 {
-            bits.pop();
-        }
-
-        // Bech32m character set
-        const CHARSET: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-
-        // Compute checksum (simplified - real implementation needs polymod)
-        let checksum = self.bech32m_checksum(hrp, &bits);
-
-        // Build the address
-        let mut result = String::from(hrp);
-        result.push('1'); // Separator
-
-        for &b in &bits {
-            result.push(CHARSET[b as usize] as char);
-        }
-
-        for &b in &checksum {
-            result.push(CHARSET[b as usize] as char);
-        }
-
-        Ok(result)
-    }
-
-    /// Bech32m decode
-    fn bech32m_decode(address: &str) -> OrchardResult<Vec<u8>> {
-        const CHARSET: &str = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-
-        // Find separator
-        let sep_pos = address
-            .rfind('1')
-            .ok_or_else(|| OrchardError::InvalidUnifiedAddress("No separator".to_string()))?;
-
-        let data_part = &address[sep_pos + 1..];
-
-        // Remove checksum (last 6 characters)
-        if data_part.len() < 6 {
-            return Err(OrchardError::InvalidUnifiedAddress(
-                "Too short".to_string(),
-            ));
-        }
-        let data_without_checksum = &data_part[..data_part.len() - 6];
-
-        // Convert from Bech32m characters to 5-bit values
-        let mut bits = Vec::new();
-        for c in data_without_checksum.chars() {
-            let idx = CHARSET
-                .find(c.to_ascii_lowercase())
-                .ok_or_else(|| OrchardError::InvalidUnifiedAddress("Invalid character".to_string()))?;
-            bits.push(idx as u8);
-        }
-
-        // Convert 5-bit groups to 8-bit bytes
-        let mut result = Vec::new();
-        let mut acc = 0u16;
-        let mut acc_bits = 0;
-
-        for &b in &bits {
-            acc = (acc << 5) | (b as u16);
-            acc_bits += 5;
-
-            if acc_bits >= 8 {
-                acc_bits -= 8;
-                result.push((acc >> acc_bits) as u8);
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Compute Bech32m checksum (simplified)
-    fn bech32m_checksum(&self, hrp: &str, data: &[u8]) -> [u8; 6] {
-        // Simplified checksum - real implementation uses polymod
-        let mut hasher = blake2b_simd::Params::new()
-            .hash_length(6)
-            .personal(b"Bech32mChecksum")
-            .to_state();
-        hasher.update(hrp.as_bytes());
-        hasher.update(data);
-        let result = hasher.finalize();
-
-        let mut checksum = [0u8; 6];
-        for (i, byte) in result.as_bytes()[..6].iter().enumerate() {
-            checksum[i] = byte & 0x1f;
-        }
-        checksum
-    }
 }
 
 #[cfg(test)]

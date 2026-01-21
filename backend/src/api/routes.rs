@@ -46,6 +46,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig, auth_service: Arc<AuthServ
                     .route("/wallets/{id}/orchard/addresses", web::get().to(handlers::get_unified_addresses))
                     .route("/wallets/{id}/orchard/balance", web::get().to(handlers::get_shielded_balance))
                     .route("/wallets/{id}/orchard/balance/combined", web::get().to(handlers::get_combined_balance))
+                    .route("/wallets/{id}/orchard/notes", web::get().to(handlers::get_unspent_notes))
                     .route("/zcash/scan/status", web::get().to(handlers::get_scan_progress))
                     .route("/zcash/scan/sync", web::post().to(handlers::sync_orchard))
                     .route("/transfers/orchard", web::post().to(handlers::initiate_orchard_transfer))

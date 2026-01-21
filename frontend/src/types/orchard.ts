@@ -85,6 +85,18 @@ export interface OrchardNote {
   memo: string | null;
 }
 
+/** Stored Orchard note from database */
+export interface StoredOrchardNote {
+  id: number;
+  nullifier: string;
+  value_zatoshis: number;
+  value_zec: number;
+  block_height: number;
+  tx_hash: string;
+  is_spent: boolean;
+  memo: string | null;
+}
+
 /** Orchard transaction info */
 export interface OrchardTransactionInfo {
   tx_hash: string;

@@ -94,6 +94,7 @@ pub struct OrchardTransferRequest {
     pub amount: String,
     pub amount_zatoshis: Option<u64>,
     pub memo: Option<String>,
+    #[allow(dead_code)]
     pub target_pool: Option<String>,
     #[serde(default)]
     pub fund_source: FundSource,
@@ -101,6 +102,7 @@ pub struct OrchardTransferRequest {
 
 /// Orchard transfer response
 #[derive(Debug, Serialize)]
+#[allow(dead_code)]
 pub struct OrchardTransferResponse {
     pub transfer_id: i64,
     pub status: String,
@@ -180,6 +182,44 @@ pub async fn get_shielded_balance(
         note_count: balance.note_count,
         pool: format!("{:?}", balance.pool).to_lowercase(),
     };
+
+    Ok(HttpResponse::Ok().json(response))
+}
+
+/// Note response for API
+#[derive(Debug, Serialize)]
+pub struct NoteResponse {
+    pub id: i32,
+    pub nullifier: String,
+    pub value_zatoshis: u64,
+    pub value_zec: f64,
+    pub block_height: u64,
+    pub tx_hash: String,
+    pub is_spent: bool,
+    pub memo: Option<String>,
+}
+
+/// Get unspent notes for a wallet
+pub async fn get_unspent_notes(
+    wallet_service: web::Data<Arc<WalletService>>,
+    path: web::Path<i32>,
+) -> AppResult<HttpResponse> {
+    let wallet_id = path.into_inner();
+    let notes = wallet_service.get_unspent_notes_from_db(wallet_id).await?;
+
+    let response: Vec<NoteResponse> = notes
+        .into_iter()
+        .map(|n| NoteResponse {
+            id: n.id,
+            nullifier: n.nullifier,
+            value_zatoshis: n.value_zatoshis,
+            value_zec: n.value_zatoshis as f64 / 100_000_000.0,
+            block_height: n.block_height,
+            tx_hash: n.tx_hash,
+            is_spent: n.is_spent,
+            memo: n.memo,
+        })
+        .collect();
 
     Ok(HttpResponse::Ok().json(response))
 }
@@ -292,16 +332,18 @@ pub async fn initiate_orchard_transfer(
             request.wallet_id,
             &request.to_address,
             &request.amount,
+            request.amount_zatoshis, // Pass zatoshis if provided by frontend
             request.memo.clone(),
             fund_source,
         )
         .await?;
 
     tracing::info!(
-        "Orchard transfer proposal created: wallet={}, to={}, amount={} ZEC, fee={} zatoshis",
+        "Orchard transfer proposal created: wallet={}, to={}, amount_zec={}, amount_zatoshis={}, fee={} zatoshis",
         request.wallet_id,
         request.to_address,
         request.amount,
+        proposal.amount_zatoshis,
         proposal.fee_zatoshis
     );
 
@@ -368,6 +410,66 @@ pub async fn execute_orchard_transfer(
         return Err(AppError::ValidationError(
             "Proposal ID mismatch".to_string(),
         ));
+    }
+
+    tracing::info!(
+        "Executing Orchard transfer: proposal={}, amount_zatoshis={}, fee_zatoshis={}, is_shielding={}",
+        proposal_id,
+        req.amount_zatoshis,
+        req.fee_zatoshis,
+        req.is_shielding
+    );
+
+    // CRITICAL SAFETY CHECK: Prevent zero-value transactions
+    // A zero-value transaction would cause all input funds to become miner fees
+    if req.amount_zatoshis == 0 {
+        tracing::error!(
+            "BLOCKED: Attempted to execute transfer with amount_zatoshis=0! proposal={}, to={}",
+            proposal_id,
+            req.to_address
+        );
+        return Err(AppError::ValidationError(
+            "Transfer amount cannot be zero. This would result in complete fund loss.".to_string(),
+        ));
+    }
+
+    // Additional sanity check: amount should be reasonable (at least 1000 zatoshis = 0.00001 ZEC)
+    const MIN_TRANSFER_ZATOSHIS: u64 = 1000;
+    if req.amount_zatoshis < MIN_TRANSFER_ZATOSHIS {
+        tracing::warn!(
+            "Transfer amount very small: {} zatoshis for proposal {}",
+            req.amount_zatoshis,
+            proposal_id
+        );
+    }
+
+    // Safety check: fee should not exceed 0.001 ZEC (100,000 zatoshis)
+    // ZIP-317 fees for shielding with change can be up to 15,000-20,000 zatoshis
+    const MAX_FEE_ZATOSHIS: u64 = 100_000; // 0.001 ZEC - reasonable upper limit
+    if req.fee_zatoshis > MAX_FEE_ZATOSHIS {
+        tracing::error!(
+            "BLOCKED: Fee ({} zatoshis) exceeds maximum allowed ({} zatoshis)! proposal={}",
+            req.fee_zatoshis,
+            MAX_FEE_ZATOSHIS,
+            proposal_id
+        );
+        return Err(AppError::ValidationError(
+            format!(
+                "Fee ({} zatoshis = {} ZEC) exceeds maximum allowed (0.001 ZEC). This indicates a configuration error.",
+                req.fee_zatoshis,
+                req.fee_zatoshis as f64 / 100_000_000.0
+            ),
+        ));
+    }
+
+    // Warning if fee seems high but still acceptable
+    if req.fee_zatoshis > 20_000 {
+        tracing::warn!(
+            "Fee is higher than typical: {} zatoshis ({} ZEC) for proposal {}",
+            req.fee_zatoshis,
+            req.fee_zatoshis as f64 / 100_000_000.0,
+            proposal_id
+        );
     }
 
     // Convert fund source

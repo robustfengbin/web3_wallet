@@ -46,6 +46,21 @@ pub struct TokenBalance {
     pub contract_address: Option<String>,
 }
 
+/// UTXO (Unspent Transaction Output) for UTXO-based chains
+#[derive(Debug, Clone)]
+pub struct Utxo {
+    /// Transaction ID (hex)
+    pub txid: String,
+    /// Output index
+    pub output_index: u32,
+    /// Script pubkey (hex)
+    pub script: String,
+    /// Value in smallest unit (zatoshis for Zcash, satoshis for Bitcoin)
+    pub value: u64,
+    /// Block height where this UTXO was created
+    pub height: u64,
+}
+
 /// Abstract trait for blockchain clients
 /// Implement this trait to add support for new chains
 #[async_trait]
@@ -103,6 +118,38 @@ pub trait ChainClient: Send + Sync {
     async fn broadcast_raw_transaction(&self, _raw_tx_hex: &str) -> AppResult<String> {
         Err(crate::error::AppError::NotImplemented(
             "Raw transaction broadcast not supported for this chain".to_string(),
+        ))
+    }
+
+    /// Get UTXOs for an address (used by UTXO-based chains like Zcash, Bitcoin)
+    /// Default implementation returns empty vec (not applicable for account-based chains)
+    async fn get_utxos(&self, _address: &str) -> AppResult<Vec<Utxo>> {
+        Ok(vec![])
+    }
+
+    /// Get the RPC URL for this chain
+    /// Default implementation returns None (not all chains have RPC URLs exposed)
+    async fn get_rpc_url(&self) -> Option<String> {
+        None
+    }
+
+    /// Get RPC authentication credentials (user, password)
+    /// Default implementation returns None (not all chains require auth)
+    async fn get_rpc_auth(&self) -> Option<(String, String)> {
+        None
+    }
+
+    /// Send a shielded/privacy transfer (used by Zcash)
+    /// Default implementation returns an error (not applicable for non-privacy chains)
+    async fn send_shielded(
+        &self,
+        _from_address: &str,
+        _to_address: &str,
+        _amount: Decimal,
+        _memo: Option<String>,
+    ) -> AppResult<String> {
+        Err(crate::error::AppError::NotImplemented(
+            "Shielded transfers not supported for this chain".to_string(),
         ))
     }
 }

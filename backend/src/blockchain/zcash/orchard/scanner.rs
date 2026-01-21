@@ -3,6 +3,8 @@
 //! Scans the blockchain to find notes that belong to a viewing key
 //! and maintains the commitment tree for spending.
 
+#![allow(dead_code)]
+
 use super::{
     constants::MIN_CONFIRMATIONS,
     keys::OrchardViewingKey,
@@ -10,6 +12,9 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+// Orchard and cryptography imports for note decryption
+use subtle::CtOption;
 
 /// Progress information for blockchain scanning
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,12 +255,26 @@ impl CommitmentTree {
 impl OrchardScanner {
     /// Create a new scanner with the given viewing keys
     pub fn new(viewing_keys: Vec<OrchardViewingKey>) -> Self {
+        // Get the minimum birthday height from all viewing keys
+        // This ensures we start scanning from the earliest possible block where notes could exist
+        let birthday_height = viewing_keys
+            .iter()
+            .map(|vk| vk.birthday_height)
+            .min()
+            .unwrap_or(2_000_000); // Default to Orchard activation height if no keys
+
+        tracing::debug!(
+            "[OrchardScanner] Created with {} viewing keys, birthday_height={}",
+            viewing_keys.len(),
+            birthday_height
+        );
+
         Self {
             viewing_keys,
             commitment_tree: CommitmentTree::new(),
             notes: HashMap::new(),
             spent_nullifiers: Vec::new(),
-            progress: ScanProgress::new("zcash", "orchard", 0, 0),
+            progress: ScanProgress::new("zcash", "orchard", birthday_height, 0),
         }
     }
 
@@ -333,15 +352,46 @@ impl OrchardScanner {
     ) -> OrchardResult<Vec<OrchardNote>> {
         let start_time = std::time::Instant::now();
         let mut found_notes = Vec::new();
+        let block_count = blocks.len();
+        let first_height = blocks.first().map(|b| b.height).unwrap_or(0);
+        let last_height = blocks.last().map(|b| b.height).unwrap_or(0);
 
         self.progress.chain_tip_height = chain_tip;
         self.progress.is_scanning = true;
 
+        let viewing_key_count = self.viewing_keys.len();
+        let mut total_actions = 0usize;
+        let mut total_txs = 0usize;
+
+        tracing::debug!(
+            "[Orchard Scan] Starting scan of {} blocks ({}-{}), {} viewing keys registered",
+            block_count,
+            first_height,
+            last_height,
+            viewing_key_count
+        );
+
         for block in blocks {
+            let block_tx_count = block.transactions.len();
+            let block_action_count: usize = block.transactions.iter().map(|tx| tx.orchard_actions.len()).sum();
+
+            if block_action_count > 0 {
+                tracing::trace!(
+                    "[Orchard Scan] Block {}: {} txs, {} orchard actions",
+                    block.height,
+                    block_tx_count,
+                    block_action_count
+                );
+            }
+
+            total_txs += block_tx_count;
+
             // Process each transaction in the block
             for tx in &block.transactions {
                 // Process Orchard actions
                 for action in &tx.orchard_actions {
+                    total_actions += 1;
+
                     // Add commitment to tree
                     let position = self.commitment_tree.append(action.cmx);
 
@@ -354,6 +404,14 @@ impl OrchardScanner {
                             block.height,
                             position,
                         ) {
+                            tracing::info!(
+                                "[Orchard Scan] 🎉 Found note! block={}, tx={}, value={} zatoshis ({:.8} ZEC), account={}",
+                                block.height,
+                                &tx.hash[..16],
+                                note.value_zatoshis,
+                                note.value_zatoshis as f64 / 100_000_000.0,
+                                vk.account_index
+                            );
                             found_notes.push(note.clone());
 
                             // Store the note
@@ -383,10 +441,21 @@ impl OrchardScanner {
             self.progress.complete();
         }
 
+        tracing::info!(
+            "[Orchard Scan] Completed: {} blocks ({}-{}), {} txs, {} actions scanned, {} notes found, {:.2}s elapsed",
+            block_count,
+            first_height,
+            last_height,
+            total_txs,
+            total_actions,
+            found_notes.len(),
+            elapsed
+        );
+
         Ok(found_notes)
     }
 
-    /// Try to decrypt a note with a viewing key
+    /// Try to decrypt a note with a viewing key using official Orchard decryption API
     fn try_decrypt_note(
         &self,
         viewing_key: &OrchardViewingKey,
@@ -395,101 +464,99 @@ impl OrchardScanner {
         block_height: u64,
         position: u64,
     ) -> Option<OrchardNote> {
-        // Attempt note decryption using the viewing key
-        // In real implementation, use proper AEAD decryption
+        use orchard::keys::PreparedIncomingViewingKey;
+        use orchard::note::{ExtractedNoteCommitment, Nullifier};
+        use orchard::note_encryption::{CompactAction, OrchardDomain};
+        use zcash_note_encryption::{batch, EphemeralKeyBytes, COMPACT_NOTE_SIZE};
 
-        // Check if the diversified key matches
-        let expected_dk = self.derive_decryption_key(viewing_key, &action.ephemeral_key);
-
-        // Try to decrypt the note ciphertext
-        if let Some((value, memo)) = self.decrypt_note_ciphertext(&action.ciphertext, &expected_dk)
-        {
-            // Compute nullifier for this note
-            let nullifier = self.compute_nullifier(viewing_key, position, &action.cmx);
-
-            return Some(OrchardNote {
-                id: None,
-                account_id: viewing_key.account_index,
-                tx_hash: tx_hash.to_string(),
-                block_height,
-                note_commitment: action.cmx,
-                nullifier,
-                value_zatoshis: value,
-                position,
-                is_spent: false,
-                memo: Some(memo),
-                merkle_path: None,
-            });
-        }
-
-        None
-    }
-
-    /// Derive decryption key from viewing key and ephemeral key
-    fn derive_decryption_key(&self, vk: &OrchardViewingKey, epk: &[u8; 32]) -> [u8; 32] {
-        let mut hasher = blake2b_simd::Params::new()
-            .hash_length(32)
-            .personal(b"ZcashOrchardDK__")
-            .to_state();
-        hasher.update(vk.fvk_bytes());
-        hasher.update(epk);
-        let result = hasher.finalize();
-
-        let mut key = [0u8; 32];
-        key.copy_from_slice(result.as_bytes());
-        key
-    }
-
-    /// Decrypt note ciphertext (simplified)
-    fn decrypt_note_ciphertext(
-        &self,
-        ciphertext: &[u8],
-        key: &[u8; 32],
-    ) -> Option<(u64, String)> {
-        // In real implementation, use ChaCha20Poly1305 AEAD
-        // This is a simplified placeholder
-
-        if ciphertext.len() < 52 {
+        // Ensure ciphertext is long enough for compact decryption (52 bytes)
+        if action.ciphertext.len() < COMPACT_NOTE_SIZE {
+            tracing::trace!("[Decrypt] Ciphertext too short: {} < {}", action.ciphertext.len(), COMPACT_NOTE_SIZE);
             return None;
         }
 
-        // XOR with key for demonstration (NOT SECURE - use proper AEAD in production)
-        let mut decrypted = vec![0u8; ciphertext.len()];
-        for (i, byte) in ciphertext.iter().enumerate() {
-            decrypted[i] = byte ^ key[i % 32];
+        // Parse nullifier
+        let nullifier = {
+            let nf_option: CtOption<Nullifier> = Nullifier::from_bytes(&action.nullifier);
+            if bool::from(nf_option.is_some()) {
+                nf_option.unwrap()
+            } else {
+                tracing::trace!("[Decrypt] Invalid nullifier bytes");
+                return None;
+            }
+        };
+
+        // Parse note commitment (cmx)
+        let cmx = {
+            let cmx_option: CtOption<ExtractedNoteCommitment> = ExtractedNoteCommitment::from_bytes(&action.cmx);
+            if bool::from(cmx_option.is_some()) {
+                cmx_option.unwrap()
+            } else {
+                tracing::trace!("[Decrypt] Invalid cmx bytes");
+                return None;
+            }
+        };
+
+        // Create compact ciphertext array
+        let enc_ciphertext: [u8; COMPACT_NOTE_SIZE] = action.ciphertext[..COMPACT_NOTE_SIZE]
+            .try_into()
+            .ok()?;
+
+        // Get the incoming viewing key from the full viewing key
+        let fvk = viewing_key.fvk();
+
+        // Try External scope first, then Internal scope
+        for scope in [orchard::keys::Scope::External, orchard::keys::Scope::Internal] {
+            let ivk = fvk.to_ivk(scope);
+            let prepared_ivk = PreparedIncomingViewingKey::new(&ivk);
+
+            // Recreate CompactAction and domain for each attempt
+            let compact_action_for_scope = CompactAction::from_parts(
+                nullifier,
+                cmx,
+                EphemeralKeyBytes(action.ephemeral_key),
+                enc_ciphertext,
+            );
+            let domain_for_scope = OrchardDomain::for_compact_action(&compact_action_for_scope);
+
+            // Use the official batch decryption API
+            // batch::try_compact_note_decryption returns Vec<Option<((Note, Address), ivk_index)>>
+            let results = batch::try_compact_note_decryption(
+                &[prepared_ivk],
+                &[(domain_for_scope, compact_action_for_scope)],
+            );
+
+            if let Some(Some(((note, _recipient), _ivk_idx))) = results.into_iter().next() {
+                // Successfully decrypted the note!
+                let value_zatoshis = note.value().inner();
+
+                // Compute the nullifier using the full viewing key
+                let note_nullifier = note.nullifier(fvk);
+
+                tracing::debug!(
+                    "[Decrypt] ✅ Successfully decrypted note: value={} zatoshis, scope={:?}",
+                    value_zatoshis,
+                    scope
+                );
+
+                return Some(OrchardNote {
+                    id: None,
+                    account_id: viewing_key.account_index,
+                    tx_hash: tx_hash.to_string(),
+                    block_height,
+                    note_commitment: action.cmx,
+                    nullifier: note_nullifier.to_bytes(),
+                    value_zatoshis,
+                    position,
+                    is_spent: false,
+                    memo: None, // Compact blocks don't include memo
+                    merkle_path: None,
+                });
+            }
         }
 
-        // Parse value (first 8 bytes)
-        let value = u64::from_le_bytes(decrypted[..8].try_into().ok()?);
-
-        // Parse memo (remaining bytes)
-        let memo_bytes = &decrypted[8..];
-        let memo = String::from_utf8_lossy(memo_bytes)
-            .trim_end_matches('\0')
-            .to_string();
-
-        Some((value, memo))
-    }
-
-    /// Compute nullifier for a note
-    fn compute_nullifier(
-        &self,
-        vk: &OrchardViewingKey,
-        position: u64,
-        commitment: &[u8; 32],
-    ) -> [u8; 32] {
-        let mut hasher = blake2b_simd::Params::new()
-            .hash_length(32)
-            .personal(b"ZcashOrchardNf__")
-            .to_state();
-        hasher.update(vk.fvk_bytes());
-        hasher.update(commitment);
-        hasher.update(&position.to_le_bytes());
-        let result = hasher.finalize();
-
-        let mut nullifier = [0u8; 32];
-        nullifier.copy_from_slice(result.as_bytes());
-        nullifier
+        // Decryption failed for all scopes - this note doesn't belong to this viewing key
+        None
     }
 
     /// Check if a nullifier corresponds to one of our notes
@@ -553,6 +620,7 @@ pub struct CompactOrchardAction {
     /// Encrypted note ciphertext
     pub ciphertext: Vec<u8>,
 }
+
 
 /// Balance breakdown by pool
 #[derive(Debug, Clone, Serialize, Deserialize)]

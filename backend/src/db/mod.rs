@@ -118,6 +118,86 @@ pub async fn run_migrations(pool: &MySqlPool) -> AppResult<()> {
     .execute(pool)
     .await?;
 
+    // Orchard sync state table - stores scan progress per wallet
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS orchard_sync_state (
+            wallet_id INT PRIMARY KEY,
+            last_scanned_height BIGINT UNSIGNED NOT NULL DEFAULT 0,
+            notes_found INT UNSIGNED NOT NULL DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            FOREIGN KEY (wallet_id) REFERENCES wallets(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Orchard notes table - stores discovered shielded notes
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS orchard_notes (
+            id INT PRIMARY KEY AUTO_INCREMENT,
+            wallet_id INT NOT NULL,
+            nullifier VARCHAR(64) NOT NULL UNIQUE,
+            value_zatoshis BIGINT UNSIGNED NOT NULL,
+            block_height BIGINT UNSIGNED NOT NULL,
+            tx_hash VARCHAR(64) NOT NULL,
+            position_in_block INT UNSIGNED NOT NULL,
+            is_spent BOOLEAN DEFAULT FALSE,
+            spent_in_tx VARCHAR(64) NULL,
+            memo TEXT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (wallet_id) REFERENCES wallets(id) ON DELETE CASCADE,
+            INDEX idx_wallet_unspent (wallet_id, is_spent),
+            INDEX idx_nullifier (nullifier)
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Add orchard_birthday_height column to wallets table if not exists
+    // This stores the block height when wallet was created (for Zcash Orchard scanning)
+    let column_exists: Option<(String,)> = sqlx::query_as(
+        r#"
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'wallets'
+        AND COLUMN_NAME = 'orchard_birthday_height'
+        "#,
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    if column_exists.is_none() {
+        sqlx::query(
+            "ALTER TABLE wallets ADD COLUMN orchard_birthday_height BIGINT UNSIGNED NULL"
+        )
+        .execute(pool)
+        .await?;
+        tracing::info!("Added orchard_birthday_height column to wallets table");
+
+        // Fix historical data: estimate birthday_height from created_at for Zcash wallets
+        // Zcash block time is ~75 seconds, Orchard activated at height 1,687,104 (May 31, 2022)
+        // Reference point: use a known block height and timestamp
+        // Block 2,000,000 was around Oct 2023
+        // We'll estimate based on: birthday = reference_height - (reference_time - created_at) / 75
+        sqlx::query(
+            r#"
+            UPDATE wallets
+            SET orchard_birthday_height = GREATEST(
+                1687104,
+                2700000 - FLOOR(TIMESTAMPDIFF(SECOND, created_at, '2025-06-01 00:00:00') / 75)
+            )
+            WHERE chain = 'zcash' AND orchard_birthday_height IS NULL
+            "#,
+        )
+        .execute(pool)
+        .await?;
+        tracing::info!("Fixed historical Zcash wallets birthday_height based on created_at");
+    }
+
     tracing::info!("Database migrations completed successfully");
     Ok(())
 }
