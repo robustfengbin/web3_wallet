@@ -836,10 +836,15 @@ impl OrchardTransferService {
             .map_err(|e| OrchardError::TransactionBuild(format!("Failed to create proof: {:?}", e)))?;
         tracing::info!("Proof created in {:.2}s", proof_start.elapsed().as_secs_f64());
 
-        // Compute sighash for signatures
-        // WARNING: Using all-zero sighash - this is incorrect for real transactions!
-        let sighash = [0u8; 32]; // TODO: Proper sighash computation
-        tracing::warn!("Using placeholder sighash (all zeros) - FIXME for production!");
+        // Compute proper sighash for signatures (ZIP 244)
+        // For shielded-to-shielded, there are no transparent inputs
+        let sighash = self.compute_shielded_sighash(
+            &[], // no transparent inputs
+            proposal.expiry_height as u32,
+            self.network.consensus_branch_id(),
+            &proven_bundle,
+        )?;
+        tracing::info!("Computed shielded sighash: {}", hex::encode(&sighash));
 
         // Apply signatures (spend auth + binding)
         let saks: Vec<orchard::keys::SpendAuthorizingKey> = selected_notes
