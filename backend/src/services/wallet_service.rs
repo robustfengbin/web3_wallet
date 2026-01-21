@@ -32,6 +32,8 @@ pub struct WalletService {
     orchard_sync: Arc<RwLock<Option<OrchardSyncService>>>,
     /// Database pool for persistence
     db_pool: MySqlPool,
+    /// Transfer repository for recording transfers
+    transfer_repo: crate::db::repositories::TransferRepository,
 }
 
 impl WalletService {
@@ -41,12 +43,14 @@ impl WalletService {
         security_config: SecurityConfig,
         db_pool: MySqlPool,
     ) -> Self {
+        let transfer_repo = crate::db::repositories::TransferRepository::new(db_pool.clone());
         Self {
             wallet_repo,
             chain_registry,
             security_config,
             orchard_sync: Arc::new(RwLock::new(None)),
             db_pool,
+            transfer_repo,
         }
     }
 
@@ -970,6 +974,51 @@ impl WalletService {
                 proposal.to_address,
                 tx_hash
             );
+
+            // Record the privacy transfer in database
+            let amount_zec = rust_decimal::Decimal::from(proposal.amount_zatoshis)
+                / rust_decimal::Decimal::from(100_000_000u64);
+            let fee_zec = rust_decimal::Decimal::from(proposal.fee_zatoshis)
+                / rust_decimal::Decimal::from(100_000_000u64);
+
+            // Get unified address as from_address for shielded transfer
+            let from_address = self.get_unified_addresses(wallet_id).await
+                .ok()
+                .and_then(|addrs| addrs.first().map(|a| a.address.clone()))
+                .unwrap_or_else(|| wallet.address.clone());
+
+            match self.transfer_repo.create(
+                wallet_id,
+                "zcash",
+                &from_address,
+                &proposal.to_address,
+                "ZEC-shielded",  // Mark as shielded transfer
+                amount_zec,
+                Some(fee_zec),
+                None,
+                1,  // System initiated (TODO: pass actual user_id)
+            ).await {
+                Ok(transfer_id) => {
+                    // Update status to submitted with tx_hash
+                    if let Err(e) = self.transfer_repo.update_status(
+                        transfer_id,
+                        "submitted",
+                        Some(&tx_hash),
+                        None,
+                    ).await {
+                        tracing::warn!("Failed to update transfer status: {}", e);
+                    }
+                    tracing::info!(
+                        "Privacy transfer recorded: id={}, wallet={}, amount={} ZEC",
+                        transfer_id,
+                        wallet_id,
+                        amount_zec
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to record privacy transfer: {}", e);
+                }
+            }
 
             return Ok(TransferResult {
                 tx_id: tx_hash,
