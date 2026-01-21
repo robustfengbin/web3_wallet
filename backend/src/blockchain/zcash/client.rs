@@ -537,11 +537,31 @@ impl ZcashClient {
 
     /// Send raw transaction via sendrawtransaction RPC (Zebra compatible)
     async fn send_raw_transaction(&self, raw_tx_hex: &str) -> AppResult<String> {
-        let tx_hash: String = self
-            .rpc_call("sendrawtransaction", (raw_tx_hex,))
-            .await?;
+        tracing::info!(
+            "[ZEC RPC] sendrawtransaction: tx_hex_len={}, tx_hex_prefix={}...",
+            raw_tx_hex.len(),
+            &raw_tx_hex[..std::cmp::min(64, raw_tx_hex.len())]
+        );
 
-        Ok(tx_hash)
+        let result: Result<String, _> = self
+            .rpc_call("sendrawtransaction", (raw_tx_hex,))
+            .await;
+
+        match &result {
+            Ok(tx_hash) => {
+                tracing::info!("[ZEC RPC] sendrawtransaction SUCCESS: tx_hash={}", tx_hash);
+            }
+            Err(e) => {
+                tracing::error!(
+                    "[ZEC RPC] sendrawtransaction FAILED: error={}\n  tx_hex_len={}\n  tx_hex_first_128={}",
+                    e,
+                    raw_tx_hex.len(),
+                    &raw_tx_hex[..std::cmp::min(128, raw_tx_hex.len())]
+                );
+            }
+        }
+
+        result
     }
 
     /// Send ZEC by building and signing a raw transaction (Zebra compatible)

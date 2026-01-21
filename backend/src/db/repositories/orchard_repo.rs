@@ -21,6 +21,14 @@ pub struct StoredOrchardNote {
     pub is_spent: bool,
     pub spent_in_tx: Option<String>,
     pub memo: Option<String>,
+    // Spending data (for shielded-to-shielded transfers)
+    pub recipient: Option<String>,  // Hex-encoded 43 bytes
+    pub rho: Option<String>,        // Hex-encoded 32 bytes
+    pub rseed: Option<String>,      // Hex-encoded 32 bytes
+    // Witness data for spending (JSON-serialized)
+    pub witness_position: Option<u64>,
+    pub witness_auth_path: Option<String>, // JSON array of hex-encoded 32-byte hashes
+    pub witness_root: Option<String>,      // Hex-encoded 32-byte root
 }
 
 /// Sync state for a wallet
@@ -140,6 +148,46 @@ impl OrchardRepository {
         Ok(result.last_insert_id() as i32)
     }
 
+    /// Save a newly discovered note with full spending data
+    pub async fn save_note_full(
+        &self,
+        wallet_id: i32,
+        nullifier: &str,
+        value_zatoshis: u64,
+        block_height: u64,
+        tx_hash: &str,
+        position_in_block: u32,
+        memo: Option<&str>,
+        recipient: &str,
+        rho: &str,
+        rseed: &str,
+    ) -> AppResult<i32> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO orchard_notes
+                (wallet_id, nullifier, value_zatoshis, block_height, tx_hash, position_in_block, memo, recipient, rho, rseed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+                recipient = VALUES(recipient),
+                rho = VALUES(rho),
+                rseed = VALUES(rseed)
+            "#
+        )
+        .bind(wallet_id)
+        .bind(nullifier)
+        .bind(value_zatoshis)
+        .bind(block_height)
+        .bind(tx_hash)
+        .bind(position_in_block)
+        .bind(memo)
+        .bind(recipient)
+        .bind(rho)
+        .bind(rseed)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.last_insert_id() as i32)
+    }
+
     /// Batch save multiple notes
     pub async fn save_notes_batch(&self, notes: &[(i32, String, u64, u64, String, u32, Option<String>)]) -> AppResult<usize> {
         if notes.is_empty() {
@@ -160,7 +208,8 @@ impl OrchardRepository {
         let notes = sqlx::query_as::<_, StoredOrchardNote>(
             r#"
             SELECT id, wallet_id, nullifier, value_zatoshis, block_height, tx_hash,
-                   position_in_block, is_spent, spent_in_tx, memo
+                   position_in_block, is_spent, spent_in_tx, memo, recipient, rho, rseed,
+                   witness_position, witness_auth_path, witness_root
             FROM orchard_notes
             WHERE wallet_id = ? AND is_spent = FALSE
             ORDER BY block_height ASC
@@ -170,6 +219,93 @@ impl OrchardRepository {
         .fetch_all(&self.pool)
         .await?;
         Ok(notes)
+    }
+
+    /// Get unspent notes with spending data (for shielded transfers)
+    pub async fn get_spendable_notes(&self, wallet_id: i32) -> AppResult<Vec<StoredOrchardNote>> {
+        let notes = sqlx::query_as::<_, StoredOrchardNote>(
+            r#"
+            SELECT id, wallet_id, nullifier, value_zatoshis, block_height, tx_hash,
+                   position_in_block, is_spent, spent_in_tx, memo, recipient, rho, rseed,
+                   witness_position, witness_auth_path, witness_root
+            FROM orchard_notes
+            WHERE wallet_id = ? AND is_spent = FALSE
+              AND recipient IS NOT NULL AND rho IS NOT NULL AND rseed IS NOT NULL
+            ORDER BY value_zatoshis DESC
+            "#
+        )
+        .bind(wallet_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(notes)
+    }
+
+    /// Get spendable notes with witness data
+    pub async fn get_notes_with_witnesses(&self, wallet_id: i32) -> AppResult<Vec<StoredOrchardNote>> {
+        let notes = sqlx::query_as::<_, StoredOrchardNote>(
+            r#"
+            SELECT id, wallet_id, nullifier, value_zatoshis, block_height, tx_hash,
+                   position_in_block, is_spent, spent_in_tx, memo, recipient, rho, rseed,
+                   witness_position, witness_auth_path, witness_root
+            FROM orchard_notes
+            WHERE wallet_id = ? AND is_spent = FALSE
+              AND recipient IS NOT NULL AND rho IS NOT NULL AND rseed IS NOT NULL
+              AND witness_auth_path IS NOT NULL AND witness_root IS NOT NULL
+            ORDER BY value_zatoshis DESC
+            "#
+        )
+        .bind(wallet_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(notes)
+    }
+
+    /// Update witness data for a note
+    pub async fn update_witness_data(
+        &self,
+        note_id: i32,
+        position: u64,
+        auth_path: &str,  // JSON array of hex strings
+        root: &str,       // Hex-encoded root
+    ) -> AppResult<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE orchard_notes
+            SET witness_position = ?, witness_auth_path = ?, witness_root = ?
+            WHERE id = ?
+            "#
+        )
+        .bind(position)
+        .bind(auth_path)
+        .bind(root)
+        .bind(note_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Update witness data by nullifier
+    pub async fn update_witness_by_nullifier(
+        &self,
+        nullifier: &str,
+        position: u64,
+        auth_path: &str,
+        root: &str,
+    ) -> AppResult<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE orchard_notes
+            SET witness_position = ?, witness_auth_path = ?, witness_root = ?
+            WHERE nullifier = ?
+            "#
+        )
+        .bind(position)
+        .bind(auth_path)
+        .bind(root)
+        .bind(nullifier)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Get total unspent balance for a wallet

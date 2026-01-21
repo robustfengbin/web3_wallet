@@ -946,42 +946,199 @@ impl WalletService {
         // Get current block height for anchor
         let anchor_height = chain_client.get_block_height().await.unwrap_or(2_500_000);
 
-        // Get spendable notes from database if using shielded funds
-        let spendable_notes = if proposal.fund_source == FundSource::Shielded
+        // Get spendable notes and anchor from the sync service (which has witnesses)
+        let (spendable_notes, tree_anchor) = if proposal.fund_source == FundSource::Shielded
             || proposal.fund_source == FundSource::Auto
         {
-            // Load notes from database
-            let orchard_repo = crate::db::repositories::OrchardRepository::new(self.db_pool.clone());
-            let stored_notes = orchard_repo.get_unspent_notes(wallet_id).await.unwrap_or_default();
+            // Helper function to get notes with witnesses and check anchor freshness
+            async fn get_notes_and_check_anchor(
+                sync_service: &crate::blockchain::zcash::orchard::sync::OrchardSyncService,
+                wallet_id: i32,
+                _chain_tip: u64,
+            ) -> (Vec<crate::blockchain::zcash::orchard::scanner::OrchardNote>, [u8; 32], bool) {
+                let notes = sync_service.get_spendable_notes_with_witnesses(wallet_id).await;
+                let notes_with_witnesses: Vec<_> = notes
+                    .into_iter()
+                    .filter(|n| n.witness_data.is_some())
+                    .collect();
 
-            // Convert to OrchardNote format
-            stored_notes
-                .into_iter()
-                .map(|n| {
-                    let mut nullifier = [0u8; 32];
-                    if let Ok(bytes) = hex::decode(&n.nullifier) {
-                        if bytes.len() == 32 {
-                            nullifier.copy_from_slice(&bytes);
+                if let Some(first_note) = notes_with_witnesses.first() {
+                    if let Some(ref witness) = first_note.witness_data {
+                        let target_root = witness.root;
+
+                        // Check if anchor is too old by checking tree block height
+                        let tree_height = sync_service.get_tree_block_height().await;
+                        let anchor_too_old = sync_service.is_anchor_too_old(tree_height).await;
+
+                        let matching_notes: Vec<_> = notes_with_witnesses
+                            .into_iter()
+                            .filter(|n| {
+                                if let Some(ref w) = n.witness_data {
+                                    w.root == target_root
+                                } else {
+                                    false
+                                }
+                            })
+                            .collect();
+
+                        return (matching_notes, target_root, anchor_too_old);
+                    }
+                }
+
+                (notes_with_witnesses, [0u8; 32], true) // Assume too old if no witness
+            }
+
+            // Get the sync service to access notes with witness data
+            let sync_guard = self.orchard_sync.read().await;
+            if let Some(ref sync_service) = *sync_guard {
+                // ALWAYS refresh witnesses before shielded transfer
+                // This ensures we have the latest tree state and valid anchors
+                // The Zcash node only accepts anchors from recent blocks (~100 blocks)
+                tracing::info!(
+                    "🔄 Refreshing witnesses before shielded transfer for wallet {}",
+                    wallet_id
+                );
+
+                match sync_service.refresh_witnesses_for_spending(wallet_id).await {
+                    Ok(true) => {
+                        tracing::info!(
+                            "✅ Witnesses refreshed successfully for wallet {}",
+                            wallet_id
+                        );
+                    }
+                    Ok(false) => {
+                        tracing::warn!(
+                            "No witnesses were refreshed for wallet {} (no notes found)",
+                            wallet_id
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to refresh witnesses for wallet {}: {}",
+                            wallet_id,
+                            e
+                        );
+                    }
+                }
+
+                // Now get notes with fresh witnesses
+                let (filtered_notes, anchor, _) =
+                    get_notes_and_check_anchor(sync_service, wallet_id, anchor_height).await;
+
+                tracing::info!(
+                    "Loaded {} notes with fresh anchor: {}",
+                    filtered_notes.len(),
+                    hex::encode(&anchor)
+                );
+
+                tracing::info!(
+                    "Loaded {} spendable notes with matching witnesses (anchor={})",
+                    filtered_notes.len(),
+                    hex::encode(&anchor)
+                );
+
+                if filtered_notes.is_empty() && proposal.fund_source == FundSource::Shielded {
+                    tracing::warn!(
+                        "No spendable notes with witness data found. \
+                         Notes may need to be rescanned to populate witnesses."
+                    );
+                }
+
+                (filtered_notes, anchor)
+            } else {
+                tracing::warn!("Sync service not initialized, falling back to database");
+                // Fallback to database (without witnesses - shielded spending may fail)
+                let orchard_repo = crate::db::repositories::OrchardRepository::new(self.db_pool.clone());
+                let stored_notes = orchard_repo.get_unspent_notes(wallet_id).await.unwrap_or_default();
+
+                // Convert to OrchardNote format (including spending data)
+                let notes = stored_notes
+                    .into_iter()
+                    .filter_map(|n| {
+                        // Parse nullifier
+                        let mut nullifier = [0u8; 32];
+                        if let Ok(bytes) = hex::decode(&n.nullifier) {
+                            if bytes.len() == 32 {
+                                nullifier.copy_from_slice(&bytes);
+                            }
                         }
-                    }
-                    crate::blockchain::zcash::orchard::scanner::OrchardNote {
-                        id: Some(n.id as i64),
-                        wallet_id: Some(wallet_id),
-                        account_id: 0,
-                        tx_hash: n.tx_hash,
-                        block_height: n.block_height,
-                        note_commitment: [0u8; 32], // Not stored in DB
-                        nullifier,
-                        value_zatoshis: n.value_zatoshis,
-                        position: n.position_in_block as u64,
-                        is_spent: n.is_spent,
-                        memo: n.memo,
-                        merkle_path: None,
-                    }
-                })
-                .collect::<Vec<_>>()
+
+                        // Parse spending data (recipient, rho, rseed)
+                        let mut recipient = [0u8; 43];
+                        let mut rho = [0u8; 32];
+                        let mut rseed = [0u8; 32];
+
+                        let has_spending_data = if let (Some(r), Some(rh), Some(rs)) =
+                            (&n.recipient, &n.rho, &n.rseed)
+                        {
+                            let r_ok = hex::decode(r)
+                                .map(|bytes| {
+                                    if bytes.len() == 43 {
+                                        recipient.copy_from_slice(&bytes);
+                                        true
+                                    } else { false }
+                                })
+                                .unwrap_or(false);
+
+                            let rho_ok = hex::decode(rh)
+                                .map(|bytes| {
+                                    if bytes.len() == 32 {
+                                        rho.copy_from_slice(&bytes);
+                                        true
+                                    } else { false }
+                                })
+                                .unwrap_or(false);
+
+                            let rseed_ok = hex::decode(rs)
+                                .map(|bytes| {
+                                    if bytes.len() == 32 {
+                                        rseed.copy_from_slice(&bytes);
+                                        true
+                                    } else { false }
+                                })
+                                .unwrap_or(false);
+
+                            r_ok && rho_ok && rseed_ok
+                        } else {
+                            false
+                        };
+
+                        // Only include notes with valid spending data for shielded spending
+                        if !has_spending_data {
+                            tracing::warn!(
+                                "Note {} missing spending data, skipping for shielded transfer",
+                                &n.nullifier[..16]
+                            );
+                            return None;
+                        }
+
+                        Some(crate::blockchain::zcash::orchard::scanner::OrchardNote {
+                            id: Some(n.id as i64),
+                            wallet_id: Some(wallet_id),
+                            account_id: 0,
+                            tx_hash: n.tx_hash,
+                            block_height: n.block_height,
+                            note_commitment: [0u8; 32], // Not stored in DB
+                            nullifier,
+                            value_zatoshis: n.value_zatoshis,
+                            position: n.position_in_block as u64,
+                            is_spent: n.is_spent,
+                            memo: n.memo,
+                            merkle_path: None,
+                            recipient,
+                            rho,
+                            rseed,
+                            // No witness data from database - shielded spending may fail
+                            witness_data: None,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+
+                // Empty anchor - transaction building will fail for shielded spending
+                (notes, [0u8; 32])
+            }
         } else {
-            vec![]
+            (vec![], [0u8; 32])
         };
 
         tracing::info!(
@@ -1000,7 +1157,7 @@ impl WalletService {
                 spendable_notes,
                 transparent_inputs,
                 anchor_height,
-                [0u8; 32], // Empty anchor - will use Anchor::empty_tree() internally
+                tree_anchor, // Tree anchor from sync service (or empty for shielding-only)
             )
             .map_err(|e| AppError::BlockchainError(format!("Failed to build transaction: {}", e)))?;
 
@@ -1190,6 +1347,10 @@ impl WalletService {
                     progress.last_scanned_height,
                     progress.notes_found
                 );
+
+                // After sync, proactively refresh witnesses for all wallets with notes
+                // This ensures witnesses are always fresh and transfers don't need to wait
+                self.refresh_all_wallet_witnesses(&wallets).await;
             }
             Err(e) => {
                 tracing::warn!("[Wallet Sync] Scan error: {}", e);
@@ -1197,6 +1358,81 @@ impl WalletService {
         }
 
         Ok(wallet_count)
+    }
+
+    /// Proactively refresh witnesses for all wallets that have shielded notes
+    ///
+    /// This is called after each sync cycle to ensure witnesses are always up-to-date,
+    /// so transfers can proceed immediately without waiting for witness refresh.
+    async fn refresh_all_wallet_witnesses(&self, wallets: &[crate::db::models::Wallet]) {
+        let sync_guard = self.orchard_sync.read().await;
+        let Some(sync_service) = sync_guard.as_ref() else {
+            return;
+        };
+
+        // Check if we need to refresh by looking at tree height
+        let tree_height = sync_service.get_tree_block_height().await;
+        if tree_height == 0 {
+            // Tree not initialized yet, skip
+            return;
+        }
+
+        // Check if witnesses are already fresh
+        if !sync_service.is_anchor_too_old(tree_height).await {
+            tracing::debug!(
+                "[Wallet Sync] Witnesses are fresh (tree_height={}), skipping refresh",
+                tree_height
+            );
+            return;
+        }
+
+        tracing::info!(
+            "[Wallet Sync] 🔄 Proactively refreshing witnesses for {} wallet(s)...",
+            wallets.len()
+        );
+
+        let mut refreshed_count = 0;
+        let mut skipped_count = 0;
+
+        for wallet in wallets {
+            // Check if this wallet has any unspent notes
+            let orchard_repo = crate::db::repositories::OrchardRepository::new(self.db_pool.clone());
+            let notes_count = orchard_repo.get_notes_count(wallet.id).await.unwrap_or(0);
+
+            if notes_count == 0 {
+                skipped_count += 1;
+                continue;
+            }
+
+            match sync_service.refresh_witnesses_for_spending(wallet.id).await {
+                Ok(true) => {
+                    refreshed_count += 1;
+                    tracing::info!(
+                        "[Wallet Sync] ✅ Refreshed witnesses for wallet {} ({} notes)",
+                        wallet.id,
+                        notes_count
+                    );
+                }
+                Ok(false) => {
+                    skipped_count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[Wallet Sync] Failed to refresh witnesses for wallet {}: {}",
+                        wallet.id,
+                        e
+                    );
+                }
+            }
+        }
+
+        if refreshed_count > 0 {
+            tracing::info!(
+                "[Wallet Sync] 🔄 Witness refresh complete: {} refreshed, {} skipped",
+                refreshed_count,
+                skipped_count
+            );
+        }
     }
 }
 

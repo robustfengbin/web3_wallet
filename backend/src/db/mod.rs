@@ -198,6 +198,60 @@ pub async fn run_migrations(pool: &MySqlPool) -> AppResult<()> {
         tracing::info!("Fixed historical Zcash wallets birthday_height based on created_at");
     }
 
+    // Add spending data columns to orchard_notes table if not exists
+    // These fields are required for shielded-to-shielded transfers
+    let recipient_column_exists: Option<(String,)> = sqlx::query_as(
+        r#"
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'orchard_notes'
+        AND COLUMN_NAME = 'recipient'
+        "#,
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    if recipient_column_exists.is_none() {
+        sqlx::query(
+            r#"
+            ALTER TABLE orchard_notes
+            ADD COLUMN recipient VARCHAR(128) NULL COMMENT 'Hex-encoded recipient address (43 bytes)',
+            ADD COLUMN rho VARCHAR(64) NULL COMMENT 'Hex-encoded rho (32 bytes)',
+            ADD COLUMN rseed VARCHAR(64) NULL COMMENT 'Hex-encoded rseed (32 bytes)'
+            "#
+        )
+        .execute(pool)
+        .await?;
+        tracing::info!("Added spending data columns (recipient, rho, rseed) to orchard_notes table");
+    }
+
+    // Add witness data columns to orchard_notes table if not exists
+    // These fields store the Merkle witness (auth path) needed to spend notes
+    let witness_column_exists: Option<(String,)> = sqlx::query_as(
+        r#"
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'orchard_notes'
+        AND COLUMN_NAME = 'witness_root'
+        "#,
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    if witness_column_exists.is_none() {
+        sqlx::query(
+            r#"
+            ALTER TABLE orchard_notes
+            ADD COLUMN witness_position BIGINT UNSIGNED NULL COMMENT 'Note position in commitment tree',
+            ADD COLUMN witness_auth_path TEXT NULL COMMENT 'JSON array of hex-encoded auth path hashes',
+            ADD COLUMN witness_root VARCHAR(64) NULL COMMENT 'Hex-encoded tree root (32 bytes)'
+            "#
+        )
+        .execute(pool)
+        .await?;
+        tracing::info!("Added witness data columns to orchard_notes table");
+    }
+
     tracing::info!("Database migrations completed successfully");
     Ok(())
 }

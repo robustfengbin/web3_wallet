@@ -11,6 +11,7 @@ pub mod keys;
 pub mod scanner;
 pub mod sync;
 pub mod transfer;
+pub mod tree;
 
 pub use address::UnifiedAddressInfo;
 pub use builder::{OrchardTransactionBuilder, OrchardTransferParams};

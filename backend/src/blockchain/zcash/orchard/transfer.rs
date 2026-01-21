@@ -26,6 +26,11 @@ use orchard::{
 };
 use rand::rngs::OsRng;
 use std::sync::OnceLock;
+use incrementalmerkletree::Hashable;
+use pasta_curves::{group::ff::PrimeField, pallas};
+
+// Orchard merkle tree depth (from Zcash protocol)
+const ORCHARD_MERKLE_DEPTH: usize = 32;
 
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 
@@ -383,13 +388,14 @@ impl OrchardTransferService {
 
         match requested {
             FundSource::Shielded => {
+                // Shielded spending: requires spending data (recipient, rho, rseed) stored during scanning
                 if shielded_available < total_needed {
                     return Err(OrchardError::InsufficientBalance {
                         available: shielded_available,
                         required: total_needed,
                     });
                 }
-                Ok((FundSource::Shielded, false))
+                Ok((FundSource::Shielded, false)) // Not a shielding operation
             }
             FundSource::Transparent => {
                 if transparent_balance < total_needed {
@@ -401,16 +407,11 @@ impl OrchardTransferService {
                 Ok((FundSource::Transparent, true)) // Shielding operation
             }
             FundSource::Auto => {
-                // Prefer shielded funds for better privacy
+                // Prefer shielded funds for better privacy, fall back to transparent
                 if shielded_available >= total_needed {
                     Ok((FundSource::Shielded, false))
                 } else if transparent_balance >= total_needed {
-                    Ok((FundSource::Transparent, true))
-                } else if shielded_available + transparent_balance >= total_needed {
-                    // Use both - this is a more complex case
-                    // For now, we'll prefer using transparent as the primary source
-                    // and shielding everything
-                    Ok((FundSource::Transparent, true))
+                    Ok((FundSource::Transparent, true)) // Shielding operation
                 } else {
                     Err(OrchardError::InsufficientBalance {
                         available: shielded_available + transparent_balance,
@@ -530,7 +531,7 @@ impl OrchardTransferService {
                 )?;
             }
             FundSource::Auto => {
-                // Mixed - for now, treat as shielded if notes available
+                // Prefer shielded spending for better privacy
                 if !spendable_notes.is_empty() {
                     self.build_shielded_bundle(
                         &mut tx_data,
@@ -539,7 +540,8 @@ impl OrchardTransferService {
                         spendable_notes,
                         anchor,
                     )?;
-                } else {
+                } else if !transparent_inputs.is_empty() {
+                    // Fall back to transparent (shielding operation)
                     self.build_shielding_bundle(
                         &mut tx_data,
                         proposal,
@@ -548,6 +550,10 @@ impl OrchardTransferService {
                         transparent_inputs,
                         anchor,
                     )?;
+                } else {
+                    return Err(OrchardError::TransactionBuild(
+                        "No funds available: no transparent UTXOs or shielded notes found".to_string()
+                    ));
                 }
             }
         }
@@ -555,38 +561,368 @@ impl OrchardTransferService {
         Ok(tx_data)
     }
 
-    /// Build shielded-to-shielded bundle
+    /// Build shielded-to-shielded bundle (spending from shielded pool)
+    ///
+    /// This creates a transaction that spends from shielded notes and sends to shielded addresses.
     fn build_shielded_bundle(
         &self,
         tx_data: &mut Vec<u8>,
         proposal: &TransferProposal,
         spending_key: &OrchardSpendingKey,
         notes: Vec<OrchardNote>,
-        anchor: [u8; 32],
+        anchor_bytes: [u8; 32],
     ) -> OrchardResult<()> {
-        // No transparent inputs
+        use super::address::OrchardAddressManager;
+        use orchard::keys::Scope;
+        use orchard::tree::{Anchor, MerkleHashOrchard};
+        use orchard::value::NoteValue;
+
+        tracing::info!(
+            "Building shielded bundle: {} notes to spend, amount={} zatoshis, fee={} zatoshis",
+            notes.len(),
+            proposal.amount_zatoshis,
+            proposal.fee_zatoshis
+        );
+
+        // Select notes to cover the required amount
+        let total_needed = proposal.amount_zatoshis + proposal.fee_zatoshis;
+        let (selected_notes, total_input) = self.select_notes(notes, total_needed)?;
+
+        tracing::info!(
+            "Selected {} notes with total {} zatoshis (need {} zatoshis)",
+            selected_notes.len(),
+            total_input,
+            total_needed
+        );
+
+        // Verify all selected notes have witness data AND their witness roots match the anchor
+        for (idx, note) in selected_notes.iter().enumerate() {
+            if note.witness_data.is_none() {
+                tracing::error!(
+                    "Note {} at position {} has no witness data. Cannot spend without valid witness.",
+                    idx,
+                    note.position
+                );
+                return Err(OrchardError::WitnessNotFound);
+            }
+
+            // Verify witness root matches the anchor
+            if let Some(ref witness) = note.witness_data {
+                if witness.root != anchor_bytes {
+                    tracing::error!(
+                        "Note {} witness root mismatch! witness.root={}, expected anchor={}",
+                        idx,
+                        hex::encode(&witness.root),
+                        hex::encode(&anchor_bytes)
+                    );
+                    return Err(OrchardError::TransactionBuild(format!(
+                        "Witness anchor mismatch for note {}: witness was created at a different tree state. \
+                         This can happen if the tree was updated after scanning. \
+                         Please resync to update witnesses.",
+                        idx
+                    )));
+                }
+
+                tracing::debug!(
+                    "Note {} witness verified: position={}, root matches anchor",
+                    idx,
+                    witness.position
+                );
+            }
+        }
+
+        // Calculate change
+        let change_amount = total_input - total_needed;
+
+        // Get the proving key
+        let pk = get_proving_key();
+
+        // Get FVK from spending key
+        let fvk = spending_key.to_fvk();
+
+        // Parse the anchor from bytes
+        // The anchor is the tree root that matches our witnesses
+        let anchor = {
+            let hash_opt: subtle::CtOption<MerkleHashOrchard> = MerkleHashOrchard::from_bytes(&anchor_bytes);
+            if hash_opt.is_some().into() {
+                Anchor::from(hash_opt.unwrap())
+            } else {
+                tracing::error!("Invalid anchor bytes: {}", hex::encode(&anchor_bytes));
+                return Err(OrchardError::TransactionBuild(
+                    "Invalid anchor bytes".to_string()
+                ));
+            }
+        };
+
+        tracing::info!(
+            "Using anchor from tree: {}",
+            hex::encode(&anchor_bytes)
+        );
+
+        // Create builder
+        let bundle_type = BundleType::DEFAULT;
+        let mut builder = OrchardBuilder::new(bundle_type, anchor);
+
+        // Add spends (reconstruct Note from stored data)
+        for (idx, note) in selected_notes.iter().enumerate() {
+            // Reconstruct the orchard::Address from stored bytes
+            let recipient_addr = orchard::Address::from_raw_address_bytes(&note.recipient);
+            if recipient_addr.is_none().into() {
+                tracing::error!("Failed to reconstruct address for note {}", idx);
+                return Err(OrchardError::TransactionBuild(
+                    format!("Invalid recipient address data for note {}", idx)
+                ));
+            }
+            let recipient_addr = recipient_addr.unwrap();
+
+            // Reconstruct Rho from stored bytes
+            let rho = orchard::note::Rho::from_bytes(&note.rho);
+            if rho.is_none().into() {
+                tracing::error!("Failed to reconstruct rho for note {}", idx);
+                return Err(OrchardError::TransactionBuild(
+                    format!("Invalid rho data for note {}", idx)
+                ));
+            }
+            let rho = rho.unwrap();
+
+            // Reconstruct RandomSeed from stored bytes
+            let rseed = orchard::note::RandomSeed::from_bytes(note.rseed, &rho);
+            if rseed.is_none().into() {
+                tracing::error!("Failed to reconstruct rseed for note {}", idx);
+                return Err(OrchardError::TransactionBuild(
+                    format!("Invalid rseed data for note {}", idx)
+                ));
+            }
+            let rseed = rseed.unwrap();
+
+            // Reconstruct the Note
+            let value = NoteValue::from_raw(note.value_zatoshis);
+            let orchard_note = orchard::Note::from_parts(recipient_addr, value, rho, rseed);
+            if orchard_note.is_none().into() {
+                tracing::error!("Failed to reconstruct note {}", idx);
+                return Err(OrchardError::TransactionBuild(
+                    format!("Failed to reconstruct Orchard note {}", idx)
+                ));
+            }
+            let orchard_note = orchard_note.unwrap();
+
+            // Verify that the reconstructed note's commitment matches the stored one
+            // This is critical for proof validity
+            let extracted_cmx = orchard::note::ExtractedNoteCommitment::from(orchard_note.commitment());
+            let reconstructed_cmx = extracted_cmx.to_bytes();
+
+            // If note_commitment is all zeros, it was loaded from database (not stored)
+            // In this case, we trust the reconstructed commitment
+            let is_db_note = note.note_commitment == [0u8; 32];
+            if !is_db_note && reconstructed_cmx != note.note_commitment {
+                tracing::error!(
+                    "Note {} commitment MISMATCH!\n  Stored:        {}\n  Reconstructed: {}",
+                    idx,
+                    hex::encode(&note.note_commitment),
+                    hex::encode(&reconstructed_cmx)
+                );
+                return Err(OrchardError::TransactionBuild(format!(
+                    "Note {} commitment mismatch - stored data may be corrupted or incomplete",
+                    idx
+                )));
+            }
+            tracing::info!(
+                "Note {} commitment: {} (from_db={})",
+                idx,
+                hex::encode(&reconstructed_cmx[..8]),
+                is_db_note
+            );
+
+            // Get the merkle path from witness data
+            let merkle_path = if let Some(ref witness) = note.witness_data {
+                // Log detailed witness info
+                tracing::info!(
+                    "Note {} witness details:\n  position={}\n  auth_path_len={}\n  auth_path[0]={}\n  auth_path[31]={}\n  root={}",
+                    idx,
+                    witness.position,
+                    witness.auth_path.len(),
+                    witness.auth_path.first().map(|h| hex::encode(&h[..8])).unwrap_or_default(),
+                    witness.auth_path.last().map(|h| hex::encode(&h[..8])).unwrap_or_default(),
+                    hex::encode(&witness.root[..16])
+                );
+
+                // Convert witness data to orchard MerklePath
+                witness.to_merkle_path()
+                    .map_err(|e| OrchardError::TransactionBuild(
+                        format!("Invalid witness for note {}: {}", idx, e)
+                    ))?
+            } else {
+                // This shouldn't happen due to the check above, but handle it anyway
+                tracing::error!("Note {} missing witness data", idx);
+                return Err(OrchardError::WitnessNotFound);
+            };
+
+            tracing::info!(
+                "Note {} MerklePath created: position={} (0x{:08x})",
+                idx,
+                note.position,
+                note.position
+            );
+
+            // Add the spend
+            match builder.add_spend(fvk.clone(), orchard_note, merkle_path) {
+                Ok(_) => {
+                    tracing::debug!(
+                        "Added spend {}: value={} zatoshis",
+                        idx,
+                        note.value_zatoshis
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("Failed to add spend {}: {:?}", idx, e);
+                    return Err(OrchardError::TransactionBuild(
+                        format!("Failed to add spend: {:?}", e)
+                    ));
+                }
+            }
+        }
+
+        // Add output: payment to recipient
+        let recipient_address = OrchardAddressManager::extract_orchard_address(&proposal.to_address)?;
+        let ovk = Some(spending_key.to_ovk());
+        let payment_value = NoteValue::from_raw(proposal.amount_zatoshis);
+        let memo_bytes: [u8; 512] = {
+            let mut bytes = [0u8; 512];
+            if let Some(m) = proposal.memo.as_ref() {
+                let len = std::cmp::min(m.as_bytes().len(), 512);
+                bytes[..len].copy_from_slice(&m.as_bytes()[..len]);
+            }
+            bytes
+        };
+
+        builder.add_output(ovk.clone(), recipient_address, payment_value, memo_bytes)
+            .map_err(|e| OrchardError::TransactionBuild(format!("Failed to add payment output: {:?}", e)))?;
+
+        tracing::info!(
+            "Added payment output: {} zatoshis to {}...",
+            proposal.amount_zatoshis,
+            &proposal.to_address[..std::cmp::min(20, proposal.to_address.len())]
+        );
+
+        // Add output: change to sender (if any)
+        if change_amount > 0 {
+            let change_diversifier = orchard::keys::Diversifier::from_bytes([0u8; 11]);
+            let change_address = fvk.address(change_diversifier, Scope::Internal);
+            let change_value = NoteValue::from_raw(change_amount);
+
+            builder.add_output(ovk, change_address, change_value, [0u8; 512])
+                .map_err(|e| OrchardError::TransactionBuild(format!("Failed to add change output: {:?}", e)))?;
+
+            tracing::info!("Added change output: {} zatoshis", change_amount);
+        }
+
+        // Build the bundle
+        tracing::info!("Building Orchard bundle with anchor: {}", hex::encode(&anchor_bytes));
+        let (unauthorized_bundle, _meta) = builder
+            .build::<i64>(&mut OsRng)
+            .map_err(|e| OrchardError::TransactionBuild(format!("Failed to build bundle: {:?}", e)))?
+            .ok_or_else(|| OrchardError::TransactionBuild("Empty bundle".to_string()))?;
+
+        tracing::info!(
+            "Bundle built successfully: {} actions in bundle",
+            unauthorized_bundle.actions().len()
+        );
+
+        // Create proof
+        tracing::info!("Creating Orchard proof (this may take a few seconds)...");
+        let proof_start = std::time::Instant::now();
+        let proven_bundle = unauthorized_bundle
+            .create_proof(pk, &mut OsRng)
+            .map_err(|e| OrchardError::TransactionBuild(format!("Failed to create proof: {:?}", e)))?;
+        tracing::info!("Proof created in {:.2}s", proof_start.elapsed().as_secs_f64());
+
+        // Compute sighash for signatures
+        // WARNING: Using all-zero sighash - this is incorrect for real transactions!
+        let sighash = [0u8; 32]; // TODO: Proper sighash computation
+        tracing::warn!("Using placeholder sighash (all zeros) - FIXME for production!");
+
+        // Apply signatures (spend auth + binding)
+        let saks: Vec<orchard::keys::SpendAuthorizingKey> = selected_notes
+            .iter()
+            .map(|_| orchard::keys::SpendAuthorizingKey::from(spending_key.sk()))
+            .collect();
+
+        tracing::info!("Applying {} spend authorization signatures", saks.len());
+        let authorized_bundle = proven_bundle
+            .apply_signatures(OsRng, sighash, &saks)
+            .map_err(|e| OrchardError::TransactionBuild(format!("Failed to apply signatures: {:?}", e)))?;
+        tracing::info!("Signatures applied successfully");
+
+        // Serialize the transaction
+        // No transparent inputs/outputs for shielded-to-shielded
         tx_data.push(0x00); // vin count
-
-        // No transparent outputs
         tx_data.push(0x00); // vout count
-
-        // No Sapling spends
         tx_data.push(0x00); // nSpendsSapling
-
-        // No Sapling outputs
         tx_data.push(0x00); // nOutputsSapling
 
-        // Build Orchard bundle
-        let orchard_bundle = self.create_orchard_actions(
-            proposal,
-            spending_key,
-            notes,
-            anchor,
-        )?;
+        // Serialize Orchard bundle
+        self.serialize_orchard_bundle(&authorized_bundle, tx_data)?;
 
-        tx_data.extend_from_slice(&orchard_bundle);
+        tracing::info!(
+            "Built shielded transaction: {} spends, {} outputs, {} bytes",
+            selected_notes.len(),
+            if change_amount > 0 { 2 } else { 1 },
+            tx_data.len()
+        );
 
         Ok(())
+    }
+
+    /// Create merkle path for a note
+    /// NOTE: This uses a simplified approach. For real chain validation,
+    /// you need the actual merkle witness from the commitment tree.
+    fn create_merkle_path_for_note(
+        &self,
+        note: &OrchardNote,
+    ) -> OrchardResult<orchard::tree::MerklePath> {
+        use orchard::tree::{MerkleHashOrchard, MerklePath};
+
+        // For a real implementation, we would:
+        // 1. Track the commitment tree incrementally
+        // 2. Store the witness (merkle path) for each note
+        // 3. Update witnesses as new blocks are added
+        //
+        // For now, we create a path that may not validate on-chain
+        // but allows the code structure to be tested
+
+        let position = note.position as u32;
+
+        // Create empty leaf for the auth path
+        let empty_leaf = MerkleHashOrchard::empty_leaf();
+
+        // Create auth path from stored merkle_path if available, otherwise use empty
+        let auth_path: [MerkleHashOrchard; ORCHARD_MERKLE_DEPTH] = if let Some(ref path) = note.merkle_path {
+            if path.len() >= ORCHARD_MERKLE_DEPTH {
+                let mut arr = [empty_leaf; ORCHARD_MERKLE_DEPTH];
+                for (i, hash) in path.iter().take(ORCHARD_MERKLE_DEPTH).enumerate() {
+                    // Convert [u8; 32] to MerkleHashOrchard via pallas::Base
+                    let base_opt: subtle::CtOption<pallas::Base> = pallas::Base::from_repr(*hash);
+                    if base_opt.is_some().into() {
+                        arr[i] = MerkleHashOrchard::from_bytes(&hash)
+                            .unwrap_or(empty_leaf);
+                    }
+                }
+                arr
+            } else {
+                [empty_leaf; ORCHARD_MERKLE_DEPTH]
+            }
+        } else {
+            // No merkle path stored - use empty leaves
+            // This won't validate on chain but allows code testing
+            tracing::warn!(
+                "Note at position {} has no merkle path, using empty leaves. \
+                 This transaction may not validate on-chain.",
+                position
+            );
+            [empty_leaf; ORCHARD_MERKLE_DEPTH]
+        };
+
+        Ok(MerklePath::from_parts(position, auth_path))
     }
 
     /// Build transparent-to-shielded (shielding) bundle
@@ -908,13 +1244,15 @@ impl OrchardTransferService {
         );
 
         let payment_value = NoteValue::from_raw(proposal.amount_zatoshis);
-        let memo_bytes: Option<[u8; 512]> = proposal.memo.as_ref().map(|m| {
+        let memo_bytes: [u8; 512] = {
             let mut bytes = [0u8; 512];
-            let memo_data = m.as_bytes();
-            let len = std::cmp::min(memo_data.len(), 512);
-            bytes[..len].copy_from_slice(&memo_data[..len]);
+            if let Some(m) = proposal.memo.as_ref() {
+                let memo_data = m.as_bytes();
+                let len = std::cmp::min(memo_data.len(), 512);
+                bytes[..len].copy_from_slice(&memo_data[..len]);
+            }
             bytes
-        });
+        };
 
         builder
             .add_output(ovk.clone(), recipient_address, payment_value, memo_bytes)
@@ -934,9 +1272,9 @@ impl OrchardTransferService {
             );
 
             let change_value = NoteValue::from_raw(change_amount);
-            // No memo for change output
+            // No memo for change output (empty memo)
             builder
-                .add_output(ovk, change_address, change_value, None)
+                .add_output(ovk, change_address, change_value, [0u8; 512])
                 .map_err(|e| OrchardError::TransactionBuild(format!("Failed to add change output: {:?}", e)))?;
         }
 

@@ -77,18 +77,23 @@ ripemd = "0.1"
 blake2b_simd = "1.0"
 
 # Zcash transaction primitives for proper sighash calculation
-zcash_primitives = "0.20"
-zcash_protocol = "0.4"
+zcash_primitives = "0.26"
+zcash_protocol = "0.7"
 
-# Zcash Orchard privacy protocol support (using stable lower-level crates)
-orchard = "0.10"
+# Zcash Orchard privacy protocol support (matching zcash_primitives 0.26)
+orchard = "0.11"
 zcash_note_encryption = "0.4"
-zcash_address = "0.6"
+zcash_address = "0.10"
 f4jumble = "0.1"
-pasta_curves = "0.5"
+pasta_curves = { version = "0.5", features = ["bits"] }
+incrementalmerkletree = { version = "0.8", features = ["legacy-api"] }
+shardtree = "0.6"
 chacha20 = "0.9"
 chacha20poly1305 = "0.10"
 subtle = "2.5"
+
+# Zcash wallet backend (provides ShardTree-based witness management)
+zcash_client_backend = { version = "0.21", default-features = false }
 
 # secp256k1 for key operations
 secp256k1 = { version = "0.28", features = ["rand"] }
