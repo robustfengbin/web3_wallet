@@ -12,7 +12,7 @@
 
 use super::{
     keys::OrchardViewingKey,
-    scanner::{CompactBlock, CompactOrchardAction, CompactTransaction, OrchardNote, OrchardScanner, ScanProgress, ShieldedBalance},
+    scanner::{CompactBlock, CompactOrchardAction, CompactTransaction, OrchardNote, OrchardScanner, ScanProgress, ShieldedBalance, SpentNoteInfo},
     OrchardError, OrchardResult, ShieldedPool,
 };
 use crate::db::repositories::OrchardRepository;
@@ -604,6 +604,9 @@ impl OrchardSyncService {
 
                 let mut scanner = self.scanner.write().await;
                 let found_notes = scanner.scan_blocks(blocks, chain_tip).await?;
+
+                // Get newly spent notes detected during this scan
+                let spent_notes = scanner.take_newly_spent_notes();
                 drop(scanner);
 
                 if !found_notes.is_empty() {
@@ -618,6 +621,17 @@ impl OrchardSyncService {
 
                     // Store notes (memory + database)
                     self.store_notes(&found_notes).await;
+                }
+
+                // Sync spent notes to database
+                if !spent_notes.is_empty() {
+                    tracing::info!(
+                        "[Orchard Sync] 💸 Detected {} spent notes in blocks {}-{}",
+                        spent_notes.len(),
+                        current_height,
+                        end_height
+                    );
+                    self.mark_notes_spent(&spent_notes).await;
                 }
             }
 
@@ -717,6 +731,38 @@ impl OrchardSyncService {
                     }
                     Err(e) => {
                         tracing::error!("[Orchard Sync] Failed to persist notes: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Mark notes as spent in database
+    async fn mark_notes_spent(&self, spent_notes: &[SpentNoteInfo]) {
+        if let Some(repo) = &self.db_repo {
+            for spent in spent_notes {
+                let nullifier_hex = hex::encode(spent.nullifier);
+                match repo.mark_note_spent(&nullifier_hex, &spent.spent_in_tx).await {
+                    Ok(updated) => {
+                        if updated {
+                            tracing::info!(
+                                "[Orchard Sync] ✅ Marked note as spent in DB: nullifier={}, tx={}",
+                                &nullifier_hex[..16],
+                                &spent.spent_in_tx[..std::cmp::min(16, spent.spent_in_tx.len())]
+                            );
+                        } else {
+                            tracing::debug!(
+                                "[Orchard Sync] Note already spent or not found: nullifier={}",
+                                &nullifier_hex[..16]
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "[Orchard Sync] Failed to mark note spent: nullifier={}, error={}",
+                            &nullifier_hex[..16],
+                            e
+                        );
                     }
                 }
             }

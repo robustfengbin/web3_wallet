@@ -155,6 +155,17 @@ mod hex_array {
     }
 }
 
+/// Information about a spent note detected during scanning
+#[derive(Debug, Clone)]
+pub struct SpentNoteInfo {
+    /// The nullifier of the spent note
+    pub nullifier: [u8; 32],
+    /// The transaction hash where the note was spent
+    pub spent_in_tx: String,
+    /// The block height where the spend was detected
+    pub block_height: u64,
+}
+
 /// Scanner for detecting Orchard notes in blocks
 pub struct OrchardScanner {
     /// Viewing keys to scan for
@@ -168,6 +179,9 @@ pub struct OrchardScanner {
 
     /// Known nullifiers (spent notes)
     spent_nullifiers: Vec<[u8; 32]>,
+
+    /// Newly detected spent notes (cleared after retrieval)
+    newly_spent_notes: Vec<SpentNoteInfo>,
 
     /// Scan progress
     progress: ScanProgress,
@@ -274,6 +288,7 @@ impl OrchardScanner {
             commitment_tree: CommitmentTree::new(),
             notes: HashMap::new(),
             spent_nullifiers: Vec::new(),
+            newly_spent_notes: Vec::new(),
             progress: ScanProgress::new("zcash", "orchard", birthday_height, 0),
         }
     }
@@ -423,7 +438,7 @@ impl OrchardScanner {
                     }
 
                     // Check for spent notes
-                    self.check_spent_nullifier(&action.nullifier);
+                    self.check_spent_nullifier(&action.nullifier, &tx.hash, block.height);
                 }
             }
 
@@ -560,21 +575,36 @@ impl OrchardScanner {
     }
 
     /// Check if a nullifier corresponds to one of our notes
-    fn check_spent_nullifier(&mut self, nullifier: &[u8; 32]) {
+    fn check_spent_nullifier(&mut self, nullifier: &[u8; 32], tx_hash: &str, block_height: u64) {
         // Check all notes
         for notes in self.notes.values_mut() {
             for note in notes.iter_mut() {
-                if &note.nullifier == nullifier {
+                if &note.nullifier == nullifier && !note.is_spent {
                     note.is_spent = true;
                     self.spent_nullifiers.push(*nullifier);
+
+                    // Record this newly spent note for database sync
+                    self.newly_spent_notes.push(SpentNoteInfo {
+                        nullifier: *nullifier,
+                        spent_in_tx: tx_hash.to_string(),
+                        block_height,
+                    });
+
                     tracing::info!(
-                        "Note spent: {} zatoshis, nullifier: {}",
+                        "Note spent: {} zatoshis, nullifier: {}, tx: {}",
                         note.value_zatoshis,
-                        hex::encode(nullifier)
+                        hex::encode(nullifier),
+                        tx_hash
                     );
                 }
             }
         }
+    }
+
+    /// Get and clear newly detected spent notes
+    /// Call this after scan_blocks to get the list of notes that were marked as spent
+    pub fn take_newly_spent_notes(&mut self) -> Vec<SpentNoteInfo> {
+        std::mem::take(&mut self.newly_spent_notes)
     }
 
     /// Get the current commitment tree anchor
@@ -583,8 +613,8 @@ impl OrchardScanner {
     }
 
     /// Mark a note as spent by nullifier
-    pub fn mark_spent(&mut self, nullifier: &[u8; 32]) {
-        self.check_spent_nullifier(nullifier);
+    pub fn mark_spent(&mut self, nullifier: &[u8; 32], tx_hash: &str, block_height: u64) {
+        self.check_spent_nullifier(nullifier, tx_hash, block_height);
     }
 }
 
