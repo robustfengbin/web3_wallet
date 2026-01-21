@@ -26,6 +26,25 @@ pub async fn create_pool(config: &DatabaseConfig) -> AppResult<MySqlPool> {
     Ok(pool)
 }
 
+/// Log current database pool statistics
+pub fn log_pool_stats(pool: &MySqlPool) {
+    let size = pool.size();
+    let idle = pool.num_idle();
+    let active = size - idle as u32;
+
+    if active > 15 {
+        tracing::warn!(
+            "[DB Pool] ⚠️ High usage: active={}, idle={}, total={}/20",
+            active, idle, size
+        );
+    } else {
+        tracing::debug!(
+            "[DB Pool] Stats: active={}, idle={}, total={}/20",
+            active, idle, size
+        );
+    }
+}
+
 pub async fn run_migrations(pool: &MySqlPool) -> AppResult<()> {
     // Create tables if they don't exist
     sqlx::query(
@@ -250,6 +269,60 @@ pub async fn run_migrations(pool: &MySqlPool) -> AppResult<()> {
         .execute(pool)
         .await?;
         tracing::info!("Added witness data columns to orchard_notes table");
+    }
+
+    // Add last_witness_height column to orchard_sync_state table if not exists
+    // This tracks when witness data was last updated, allowing lazy witness sync
+    let witness_height_column_exists: Option<(String,)> = sqlx::query_as(
+        r#"
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'orchard_sync_state'
+        AND COLUMN_NAME = 'last_witness_height'
+        "#,
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    if witness_height_column_exists.is_none() {
+        sqlx::query(
+            r#"
+            ALTER TABLE orchard_sync_state
+            ADD COLUMN last_witness_height BIGINT UNSIGNED NOT NULL DEFAULT 0
+                COMMENT 'Block height when witnesses were last updated'
+            "#
+        )
+        .execute(pool)
+        .await?;
+        tracing::info!("Added last_witness_height column to orchard_sync_state table");
+    }
+
+    // Expand from_address and to_address columns in transfers table for Zcash Unified Addresses
+    // Zcash UA can be 250+ characters, VARCHAR(42) was for Ethereum addresses only
+    let address_col_info: Option<(String,)> = sqlx::query_as(
+        r#"
+        SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'transfers'
+        AND COLUMN_NAME = 'from_address'
+        AND CHARACTER_MAXIMUM_LENGTH < 512
+        "#,
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    if address_col_info.is_some() {
+        sqlx::query(
+            "ALTER TABLE transfers MODIFY COLUMN from_address VARCHAR(512) NOT NULL"
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "ALTER TABLE transfers MODIFY COLUMN to_address VARCHAR(512) NOT NULL"
+        )
+        .execute(pool)
+        .await?;
+        tracing::info!("Expanded from_address and to_address columns to VARCHAR(512) for Zcash addresses");
     }
 
     tracing::info!("Database migrations completed successfully");

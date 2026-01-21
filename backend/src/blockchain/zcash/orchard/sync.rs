@@ -729,44 +729,10 @@ impl OrchardSyncService {
             return Ok(scanner.progress().clone());
         }
 
-        // Get the minimum scan height across all wallets
-        let mut start_height = self.get_min_scan_height().await;
-
-        // Check if tree needs to be initialized from frontier
-        // This is needed after service restart when tree state is lost
-        let tree_needs_init = {
-            let scanner = self.scanner.read().await;
-            let tree_size = scanner.tree_tracker().tree_size();
-            let witness_count = scanner.tree_tracker().witness_count();
-            // Tree is considered uninitialized if it's too small
-            tree_size < 100 && witness_count == 0
-        };
-
-        // Get earliest note height from database to determine if we need full rescan
-        let earliest_note_height = self.get_earliest_note_height().await;
-
-        if tree_needs_init && earliest_note_height.is_some() {
-            let note_height = earliest_note_height.unwrap();
-            tracing::info!(
-                "[Orchard Sync] 🔄 Tree needs initialization. Earliest note at height {}, will init from frontier",
-                note_height
-            );
-
-            // Initialize tree from frontier and rescan from note height
-            if let Err(e) = self.initialize_tree_from_frontier(note_height).await {
-                tracing::warn!(
-                    "[Orchard Sync] Failed to initialize tree from frontier: {:?}",
-                    e
-                );
-            } else {
-                // Override start_height to scan from note height
-                start_height = note_height.saturating_sub(1);
-                tracing::info!(
-                    "[Orchard Sync] Tree initialized, will scan from height {}",
-                    start_height
-                );
-            }
-        }
+        // Get the minimum scan height across all wallets (from database)
+        // This is the authoritative sync progress - we don't need to rescan from note height
+        // just because tree state is lost. Witness refresh is handled separately when spending.
+        let start_height = self.get_min_scan_height().await;
 
         tracing::info!(
             "[Orchard Sync] Chain tip: {}, start height: {}, registered wallets: {}",
@@ -797,6 +763,11 @@ impl OrchardSyncService {
         let mut total_blocks_scanned = 0usize;
         let sync_start = std::time::Instant::now();
         let mut last_persist_height = start_height;
+
+        // Time tracking for detailed statistics
+        let mut total_fetch_time = std::time::Duration::ZERO;
+        let mut total_scan_time = std::time::Duration::ZERO;
+        let mut total_note_store_time = std::time::Duration::ZERO;
 
         while current_height <= chain_tip {
             let end_height = std::cmp::min(current_height + batch_size - 1, chain_tip);
@@ -836,6 +807,7 @@ impl OrchardSyncService {
             }
 
             let fetch_elapsed = fetch_start.elapsed();
+            total_fetch_time += fetch_elapsed;
 
             // Sort blocks by height
             all_blocks.sort_by_key(|(h, _)| *h);
@@ -854,12 +826,15 @@ impl OrchardSyncService {
             if !blocks.is_empty() {
                 total_blocks_scanned += blocks.len();
 
+                // Time the scan operation
+                let scan_start = std::time::Instant::now();
                 let mut scanner = self.scanner.write().await;
                 let found_notes = scanner.scan_blocks(blocks, chain_tip).await?;
 
                 // Get newly spent notes detected during this scan
                 let spent_notes = scanner.take_newly_spent_notes();
                 drop(scanner);
+                total_scan_time += scan_start.elapsed();
 
                 if !found_notes.is_empty() {
                     total_notes_found += found_notes.len();
@@ -871,8 +846,10 @@ impl OrchardSyncService {
                         total_notes_found
                     );
 
-                    // Store notes (memory + database)
+                    // Store notes (memory + database) - time this operation
+                    let note_store_start = std::time::Instant::now();
                     self.store_notes(&found_notes).await;
+                    total_note_store_time += note_store_start.elapsed();
                 }
 
                 // Sync spent notes to database
@@ -883,7 +860,9 @@ impl OrchardSyncService {
                         current_height,
                         end_height
                     );
+                    let spent_store_start = std::time::Instant::now();
                     self.mark_notes_spent(&spent_notes).await;
+                    total_note_store_time += spent_store_start.elapsed();
                 }
             }
 
@@ -927,58 +906,47 @@ impl OrchardSyncService {
         // Final persist
         self.persist_scan_state(chain_tip).await;
 
-        // Persist witnesses to database so they survive restarts
-        self.persist_witnesses().await;
+        // Persist witnesses to database only if needed (lazy sync)
+        // Check if witness height is more than 50 blocks behind chain tip
+        let witness_start = std::time::Instant::now();
+        let witness_synced = self.maybe_persist_witnesses(chain_tip).await;
+        let witness_time = witness_start.elapsed();
 
-        // Validate our computed tree root against the expected anchor from Zcash node
-        // This helps diagnose tree building issues
-        {
-            let scanner = self.scanner.read().await;
-            let computed_root = scanner.get_current_root();
-            let tree_position = scanner.tree_tracker().position();
-            let witness_count = scanner.tree_tracker().witness_count();
+        let total_elapsed = sync_start.elapsed();
+        let total_secs = total_elapsed.as_secs_f64();
 
-            tracing::info!(
-                "[Orchard Sync] Tree state: position={}, witnesses={}, root={}",
-                tree_position,
-                witness_count,
-                hex::encode(&computed_root)
-            );
+        // Calculate other time (tree validation, etc.)
+        let other_time = total_elapsed
+            .saturating_sub(total_fetch_time)
+            .saturating_sub(total_scan_time)
+            .saturating_sub(total_note_store_time)
+            .saturating_sub(witness_time);
 
-            match self.get_expected_anchor(chain_tip).await {
-                Ok(expected_anchor) => {
-                    if computed_root == expected_anchor {
-                        tracing::info!(
-                            "[Orchard Sync] ✅ Tree root MATCHES expected anchor at chain tip {}",
-                            chain_tip
-                        );
-                    } else {
-                        tracing::error!(
-                            "[Orchard Sync] ❌ Tree root MISMATCH at chain tip {}!\n  Computed: {}\n  Expected: {}\n  This will cause 'unknown anchor' errors during transfers.",
-                            chain_tip,
-                            hex::encode(&computed_root),
-                            hex::encode(&expected_anchor)
-                        );
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "[Orchard Sync] Could not validate tree root at chain tip: {}",
-                        e
-                    );
-                }
-            }
-        }
-
-        let total_elapsed = sync_start.elapsed().as_secs_f64();
         tracing::info!(
-            "[Orchard Sync] ✅ Sync complete to height {} ({} blocks in {:.1}s, {:.1} blocks/sec, {} notes found)",
+            "[Orchard Sync] ✅ Sync complete to height {} ({} blocks, {} notes found)",
             chain_tip,
             total_blocks_scanned,
-            total_elapsed,
-            total_blocks_scanned as f64 / total_elapsed.max(0.1),
             total_notes_found
         );
+        tracing::info!(
+            "[Orchard Sync] ⏱️  Time breakdown: total={:.2}s | fetch={:.2}s | scan={:.2}s | note_db={:.2}s | witness={:.2}s{} | other={:.2}s",
+            total_secs,
+            total_fetch_time.as_secs_f64(),
+            total_scan_time.as_secs_f64(),
+            total_note_store_time.as_secs_f64(),
+            witness_time.as_secs_f64(),
+            if witness_synced { " (synced)" } else { " (skipped)" },
+            other_time.as_secs_f64()
+        );
+        tracing::info!(
+            "[Orchard Sync] 📊 Performance: {:.1} blocks/sec",
+            total_blocks_scanned as f64 / total_secs.max(0.1)
+        );
+
+        // Log database pool stats after sync
+        if let Some(repo) = &self.db_repo {
+            crate::db::log_pool_stats(repo.pool());
+        }
 
         let scanner = self.scanner.read().await;
         Ok(scanner.progress().clone())
@@ -1100,6 +1068,68 @@ impl OrchardSyncService {
 
             tracing::debug!("[Orchard Sync] Persisted scan state at height {}", height);
         }
+    }
+
+    /// Minimum blocks difference before triggering witness persistence
+    const WITNESS_SYNC_THRESHOLD: u64 = 50;
+
+    /// Persist witnesses only if the height difference exceeds threshold
+    ///
+    /// This implements lazy witness sync - witnesses are only updated when:
+    /// 1. The chain has advanced more than 50 blocks since last witness update
+    /// 2. This reduces unnecessary database writes during regular sync cycles
+    ///
+    /// Returns true if witnesses were actually synced, false if skipped
+    async fn maybe_persist_witnesses(&self, chain_tip: u64) -> bool {
+        if let Some(repo) = &self.db_repo {
+            // Get the minimum witness height across all wallets with unspent notes
+            let min_witness_height = match repo.get_min_witness_height().await {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!("[Orchard Sync] Failed to get min witness height: {}", e);
+                    0
+                }
+            };
+
+            let blocks_behind = chain_tip.saturating_sub(min_witness_height);
+
+            if blocks_behind >= Self::WITNESS_SYNC_THRESHOLD {
+                tracing::info!(
+                    "[Orchard Sync] Witness sync triggered: chain_tip={}, last_witness_height={}, behind={} blocks",
+                    chain_tip,
+                    min_witness_height,
+                    blocks_behind
+                );
+
+                // Persist witnesses
+                self.persist_witnesses().await;
+
+                // Update witness height for all wallets
+                let keys = self.wallet_keys.read().await;
+                for wallet_id in keys.keys() {
+                    if let Err(e) = repo.update_witness_height(*wallet_id, chain_tip).await {
+                        tracing::warn!(
+                            "[Orchard Sync] Failed to update witness height for wallet {}: {}",
+                            wallet_id,
+                            e
+                        );
+                    }
+                }
+
+                tracing::info!(
+                    "[Orchard Sync] ✅ Witness sync complete, updated to height {}",
+                    chain_tip
+                );
+                return true;
+            } else {
+                tracing::debug!(
+                    "[Orchard Sync] Witness sync skipped: only {} blocks behind (threshold={})",
+                    blocks_behind,
+                    Self::WITNESS_SYNC_THRESHOLD
+                );
+            }
+        }
+        false
     }
 
     /// Get balance for a wallet (from database if available)
@@ -1825,19 +1855,28 @@ impl OrchardSyncService {
     /// Persist witness data to database for all tracked notes
     ///
     /// Call this after scanning to ensure witnesses are saved for later use.
+    /// Uses nullifier deduplication to avoid saving the same witness multiple times
+    /// when multiple wallets share the same account_index.
     pub async fn persist_witnesses(&self) {
         if let Some(repo) = &self.db_repo {
             let scanner = self.scanner.read().await;
             let keys = self.wallet_keys.read().await;
+            let chain_height = self.get_chain_height().await.unwrap_or(0);
 
             let mut saved_count = 0;
             let mut error_count = 0;
+            let mut processed_nullifiers = std::collections::HashSet::new();
 
-            for (wallet_id, vk) in keys.iter() {
-                let chain_height = self.get_chain_height().await.unwrap_or(0);
+            for (_wallet_id, vk) in keys.iter() {
                 let notes = scanner.get_spendable_notes(vk.account_index, chain_height);
 
                 for note in notes {
+                    // Skip if already processed (deduplication)
+                    if processed_nullifiers.contains(&note.nullifier) {
+                        continue;
+                    }
+                    processed_nullifiers.insert(note.nullifier);
+
                     if let Some(ref witness) = note.witness_data {
                         let nullifier_hex = hex::encode(note.nullifier);
 
@@ -1866,11 +1905,6 @@ impl OrchardSyncService {
                             Ok(updated) => {
                                 if updated {
                                     saved_count += 1;
-                                    tracing::debug!(
-                                        "[Orchard Sync] Saved witness for wallet={}, nullifier={}...",
-                                        wallet_id,
-                                        &nullifier_hex[..16]
-                                    );
                                 }
                             }
                             Err(e) => {

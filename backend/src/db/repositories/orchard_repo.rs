@@ -37,6 +37,9 @@ pub struct OrchardSyncState {
     pub wallet_id: i32,
     pub last_scanned_height: u64,
     pub notes_found: u32,
+    /// Block height when witness data was last updated
+    /// Used to determine if witnesses need refresh (lazy sync)
+    pub last_witness_height: u64,
 }
 
 pub struct OrchardRepository {
@@ -48,6 +51,11 @@ impl OrchardRepository {
         Self { pool }
     }
 
+    /// Get a reference to the connection pool for monitoring
+    pub fn pool(&self) -> &MySqlPool {
+        &self.pool
+    }
+
     // =========================================================================
     // Sync State Operations
     // =========================================================================
@@ -55,7 +63,7 @@ impl OrchardRepository {
     /// Get sync state for a wallet
     pub async fn get_sync_state(&self, wallet_id: i32) -> AppResult<Option<OrchardSyncState>> {
         let state = sqlx::query_as::<_, OrchardSyncState>(
-            "SELECT wallet_id, last_scanned_height, notes_found FROM orchard_sync_state WHERE wallet_id = ?"
+            "SELECT wallet_id, last_scanned_height, notes_found, last_witness_height FROM orchard_sync_state WHERE wallet_id = ?"
         )
         .bind(wallet_id)
         .fetch_optional(&self.pool)
@@ -90,6 +98,32 @@ impl OrchardRepository {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Update witness height for a wallet (called after persist_witnesses)
+    pub async fn update_witness_height(&self, wallet_id: i32, witness_height: u64) -> AppResult<()> {
+        sqlx::query(
+            "UPDATE orchard_sync_state SET last_witness_height = ? WHERE wallet_id = ?"
+        )
+        .bind(witness_height)
+        .bind(wallet_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Get minimum last_witness_height across all wallets with unspent notes
+    pub async fn get_min_witness_height(&self) -> AppResult<u64> {
+        let result: Option<(u64,)> = sqlx::query_as(
+            r#"
+            SELECT MIN(s.last_witness_height) FROM orchard_sync_state s
+            INNER JOIN orchard_notes n ON s.wallet_id = n.wallet_id
+            WHERE n.is_spent = FALSE
+            "#
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(result.map(|(h,)| h).unwrap_or(0))
     }
 
     /// Batch update sync state for multiple wallets

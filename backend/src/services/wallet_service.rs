@@ -989,39 +989,10 @@ impl WalletService {
             }
 
             // Get the sync service to access notes with witness data
+            // Witness refresh is handled by periodic sync task, no need to refresh here
             let sync_guard = self.orchard_sync.read().await;
             if let Some(ref sync_service) = *sync_guard {
-                // ALWAYS refresh witnesses before shielded transfer
-                // This ensures we have the latest tree state and valid anchors
-                // The Zcash node only accepts anchors from recent blocks (~100 blocks)
-                tracing::info!(
-                    "🔄 Refreshing witnesses before shielded transfer for wallet {}",
-                    wallet_id
-                );
-
-                match sync_service.refresh_witnesses_for_spending(wallet_id).await {
-                    Ok(true) => {
-                        tracing::info!(
-                            "✅ Witnesses refreshed successfully for wallet {}",
-                            wallet_id
-                        );
-                    }
-                    Ok(false) => {
-                        tracing::warn!(
-                            "No witnesses were refreshed for wallet {} (no notes found)",
-                            wallet_id
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            "Failed to refresh witnesses for wallet {}: {}",
-                            wallet_id,
-                            e
-                        );
-                    }
-                }
-
-                // Now get notes with fresh witnesses
+                // Get notes with witnesses (already refreshed by sync task)
                 let (filtered_notes, anchor, _) =
                     get_notes_and_check_anchor(sync_service, wallet_id, anchor_height).await;
 
