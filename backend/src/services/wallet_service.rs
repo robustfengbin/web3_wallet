@@ -946,13 +946,58 @@ impl WalletService {
         // Get current block height for anchor
         let anchor_height = chain_client.get_block_height().await.unwrap_or(2_500_000);
 
+        // Get spendable notes from database if using shielded funds
+        let spendable_notes = if proposal.fund_source == FundSource::Shielded
+            || proposal.fund_source == FundSource::Auto
+        {
+            // Load notes from database
+            let orchard_repo = crate::db::repositories::OrchardRepository::new(self.db_pool.clone());
+            let stored_notes = orchard_repo.get_unspent_notes(wallet_id).await.unwrap_or_default();
+
+            // Convert to OrchardNote format
+            stored_notes
+                .into_iter()
+                .map(|n| {
+                    let mut nullifier = [0u8; 32];
+                    if let Ok(bytes) = hex::decode(&n.nullifier) {
+                        if bytes.len() == 32 {
+                            nullifier.copy_from_slice(&bytes);
+                        }
+                    }
+                    crate::blockchain::zcash::orchard::scanner::OrchardNote {
+                        id: Some(n.id as i64),
+                        wallet_id: Some(wallet_id),
+                        account_id: 0,
+                        tx_hash: n.tx_hash,
+                        block_height: n.block_height,
+                        note_commitment: [0u8; 32], // Not stored in DB
+                        nullifier,
+                        value_zatoshis: n.value_zatoshis,
+                        position: n.position_in_block as u64,
+                        is_spent: n.is_spent,
+                        memo: n.memo,
+                        merkle_path: None,
+                    }
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![]
+        };
+
+        tracing::info!(
+            "execute_privacy_transfer: fund_source={:?}, transparent_inputs={}, spendable_notes={}",
+            proposal.fund_source,
+            transparent_inputs.len(),
+            spendable_notes.len()
+        );
+
         // Build the Orchard transaction (includes proof generation and signing)
         let result = transfer_service
             .build_transaction(
                 proposal,
                 &spending_key,
                 &private_key, // Private key for signing transparent inputs
-                vec![],       // No spendable notes for shielding
+                spendable_notes,
                 transparent_inputs,
                 anchor_height,
                 [0u8; 32], // Empty anchor - will use Anchor::empty_tree() internally
