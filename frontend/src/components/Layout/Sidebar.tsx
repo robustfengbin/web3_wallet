@@ -109,15 +109,15 @@ export function Sidebar() {
   const location = useLocation();
 
   return (
-    <aside className="w-64 min-w-[256px] bg-gray-900 text-white flex flex-col h-screen">
+    <aside className="w-64 min-w-64 bg-gray-900 text-white h-screen shrink-0" style={{ display: 'flex', flexDirection: 'column' }}>
       {/* Header */}
-      <div className="p-6">
+      <div className="p-6 shrink-0">
         <h1 className="text-xl font-bold">{t('sidebar.title')}</h1>
         <p className="text-gray-400 text-sm mt-1">{t('sidebar.subtitle')}</p>
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 overflow-y-auto">
+      <nav className="flex-1 overflow-y-auto" style={{ minHeight: 0 }}>
         {/* Dashboard */}
         <NavLink
           to="/"
