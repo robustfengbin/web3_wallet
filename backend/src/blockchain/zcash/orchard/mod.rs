@@ -19,7 +19,6 @@ pub use builder::{OrchardTransactionBuilder, OrchardTransferParams};
 pub use keys::OrchardViewingKey;
 pub use scanner::ScanProgress;
 pub use transfer::init_proving_key;
-pub use witness_sync::WitnessSyncManager;
 
 /// Orchard protocol constants
 pub mod constants {

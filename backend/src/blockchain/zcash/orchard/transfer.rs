@@ -130,8 +130,10 @@ pub struct TransferProposal {
     pub fee_zatoshis: u64,
     /// Source of funds
     pub fund_source: FundSource,
-    /// Whether this is a shielding operation
+    /// Whether this is a shielding operation (T → Z)
     pub is_shielding: bool,
+    /// Whether this is a deshielding operation (Z → T)
+    pub is_deshielding: bool,
     /// Recipient address
     pub to_address: String,
     /// Memo if provided
@@ -221,16 +223,35 @@ impl OrchardTransferService {
     ) -> OrchardResult<TransferProposal> {
         let amount = request.get_zatoshis()?;
 
+        // Check if target address is transparent (deshielding operation)
+        let is_deshielding = is_transparent_address(&request.to_address);
+
         // Determine effective fund source and validate balance
-        let (fund_source, is_shielding) = self.determine_fund_source(
-            request.fund_source,
-            amount,
-            transparent_balance_zatoshis,
-            shielded_balance,
-        )?;
+        let (fund_source, is_shielding) = if is_deshielding {
+            // Deshielding: must use shielded funds to send to transparent address
+            let shielded_available = shielded_balance.map(|b| b.spendable_zatoshis).unwrap_or(0);
+            if shielded_available == 0 {
+                return Err(OrchardError::TransactionBuild(
+                    "Deshielding requires shielded balance but none is available".to_string()
+                ));
+            }
+            (FundSource::Shielded, false)
+        } else {
+            self.determine_fund_source(
+                request.fund_source,
+                amount,
+                transparent_balance_zatoshis,
+                shielded_balance,
+            )?
+        };
 
         // Calculate fee based on action count
-        let fee = self.calculate_fee(1, fund_source);
+        // For deshielding, we have 1 transparent output which must be included in fee calculation
+        let fee = if is_deshielding {
+            self.calculate_fee_with_transparent_outputs(1, fund_source, 1) // 1 transparent output
+        } else {
+            self.calculate_fee(1, fund_source)
+        };
         let total_needed = amount + fee;
 
         // Validate sufficient funds
@@ -262,6 +283,7 @@ impl OrchardTransferService {
             fee_zatoshis: fee,
             fund_source,
             is_shielding,
+            is_deshielding,
             to_address: request.to_address.clone(),
             memo: request.memo.clone(),
             expiry_height,
@@ -427,8 +449,13 @@ impl OrchardTransferService {
     /// ZIP-317: fee ≥ marginal_fee × max(grace_actions, logical_actions)
     /// - marginal_fee = 5000 zatoshis
     /// - grace_actions = 2
-    /// - logical_actions = transparent_inputs + orchard_actions
+    /// - logical_actions = transparent_inputs + transparent_outputs + orchard_actions
     fn calculate_fee(&self, num_outputs: u32, fund_source: FundSource) -> u64 {
+        self.calculate_fee_with_transparent_outputs(num_outputs, fund_source, 0)
+    }
+
+    /// Calculate transaction fee with explicit transparent output count (for deshielding)
+    fn calculate_fee_with_transparent_outputs(&self, num_outputs: u32, fund_source: FundSource, transparent_outputs: u32) -> u64 {
         // ZIP-317 constants
         const MARGINAL_FEE: u64 = 5000;
         const GRACE_ACTIONS: u32 = 2;
@@ -453,12 +480,14 @@ impl OrchardTransferService {
             }
         };
 
-        let logical_actions = transparent_inputs + orchard_actions;
+        // logical_actions includes transparent inputs, transparent outputs, and orchard actions
+        let logical_actions = transparent_inputs + transparent_outputs + orchard_actions;
         let fee = MARGINAL_FEE * std::cmp::max(GRACE_ACTIONS, logical_actions) as u64;
 
         tracing::debug!(
-            "ZIP-317 fee calculation: transparent_inputs={}, orchard_actions={}, logical_actions={}, fee={}",
+            "ZIP-317 fee calculation: transparent_inputs={}, transparent_outputs={}, orchard_actions={}, logical_actions={}, fee={}",
             transparent_inputs,
+            transparent_outputs,
             orchard_actions,
             logical_actions,
             fee
@@ -507,32 +536,28 @@ impl OrchardTransferService {
         // Expiry height
         tx_data.extend_from_slice(&(proposal.expiry_height as u32).to_le_bytes());
 
-        // Build the appropriate bundle based on fund source
-        match proposal.fund_source {
-            FundSource::Shielded => {
-                // Shielded to shielded transfer
-                self.build_shielded_bundle(
-                    &mut tx_data,
-                    proposal,
-                    spending_key,
-                    spendable_notes,
-                    anchor,
-                )?;
-            }
-            FundSource::Transparent => {
-                // Transparent to shielded (shielding)
-                self.build_shielding_bundle(
-                    &mut tx_data,
-                    proposal,
-                    spending_key,
-                    private_key_hex,
-                    transparent_inputs,
-                    anchor,
-                )?;
-            }
-            FundSource::Auto => {
-                // Prefer shielded spending for better privacy
-                if !spendable_notes.is_empty() {
+        // Check if this is a deshielding operation (Z → T)
+        let is_deshielding = is_transparent_address(&proposal.to_address);
+
+        // Build the appropriate bundle based on fund source and target address
+        if is_deshielding {
+            // Deshielding: Shielded to transparent transfer
+            tracing::info!(
+                "Building deshielding transaction: Z → T, amount={} zatoshis to {}",
+                proposal.amount_zatoshis,
+                &proposal.to_address
+            );
+            self.build_deshielding_bundle(
+                &mut tx_data,
+                proposal,
+                spending_key,
+                spendable_notes,
+                anchor,
+            )?;
+        } else {
+            match proposal.fund_source {
+                FundSource::Shielded => {
+                    // Shielded to shielded transfer
                     self.build_shielded_bundle(
                         &mut tx_data,
                         proposal,
@@ -540,8 +565,9 @@ impl OrchardTransferService {
                         spendable_notes,
                         anchor,
                     )?;
-                } else if !transparent_inputs.is_empty() {
-                    // Fall back to transparent (shielding operation)
+                }
+                FundSource::Transparent => {
+                    // Transparent to shielded (shielding)
                     self.build_shielding_bundle(
                         &mut tx_data,
                         proposal,
@@ -550,10 +576,32 @@ impl OrchardTransferService {
                         transparent_inputs,
                         anchor,
                     )?;
-                } else {
-                    return Err(OrchardError::TransactionBuild(
-                        "No funds available: no transparent UTXOs or shielded notes found".to_string()
-                    ));
+                }
+                FundSource::Auto => {
+                    // Prefer shielded spending for better privacy
+                    if !spendable_notes.is_empty() {
+                        self.build_shielded_bundle(
+                            &mut tx_data,
+                            proposal,
+                            spending_key,
+                            spendable_notes,
+                            anchor,
+                        )?;
+                    } else if !transparent_inputs.is_empty() {
+                        // Fall back to transparent (shielding operation)
+                        self.build_shielding_bundle(
+                            &mut tx_data,
+                            proposal,
+                            spending_key,
+                            private_key_hex,
+                            transparent_inputs,
+                            anchor,
+                        )?;
+                    } else {
+                        return Err(OrchardError::TransactionBuild(
+                            "No funds available: no transparent UTXOs or shielded notes found".to_string()
+                        ));
+                    }
                 }
             }
         }
@@ -774,6 +822,401 @@ impl OrchardTransferService {
         );
 
         Ok(())
+    }
+
+    /// Build deshielding bundle (shielded to transparent transfer, Z → T)
+    ///
+    /// This creates a transaction that spends from shielded notes and sends to transparent addresses.
+    /// The recipient will receive funds at their transparent address (t1... or t3...)
+    fn build_deshielding_bundle(
+        &self,
+        tx_data: &mut Vec<u8>,
+        proposal: &TransferProposal,
+        spending_key: &OrchardSpendingKey,
+        notes_with_paths: Vec<(OrchardNote, MerklePath)>,
+        anchor: Anchor,
+    ) -> OrchardResult<()> {
+        use orchard::keys::Scope;
+        use orchard::value::NoteValue;
+
+        tracing::info!(
+            "Building deshielding bundle: {} notes to spend, amount={} zatoshis, fee={} zatoshis, to={}",
+            notes_with_paths.len(),
+            proposal.amount_zatoshis,
+            proposal.fee_zatoshis,
+            &proposal.to_address
+        );
+
+        // Select notes to cover the required amount
+        let total_needed = proposal.amount_zatoshis + proposal.fee_zatoshis;
+        let (selected_notes_with_paths, total_input) = self.select_notes_with_paths(notes_with_paths, total_needed)?;
+
+        tracing::info!(
+            "Selected {} notes with total {} zatoshis (need {} zatoshis)",
+            selected_notes_with_paths.len(),
+            total_input,
+            total_needed
+        );
+
+        // Calculate change (change goes back to shielded pool)
+        let change_amount = total_input - total_needed;
+
+        // Get the proving key
+        let pk = get_proving_key();
+
+        // Get FVK from spending key
+        let fvk = spending_key.to_fvk();
+
+        // Create builder with the anchor
+        let bundle_type = BundleType::DEFAULT;
+        let mut builder = OrchardBuilder::new(bundle_type, anchor);
+
+        // Add spends (from shielded notes)
+        for (idx, (note, merkle_path)) in selected_notes_with_paths.iter().enumerate() {
+            // Reconstruct the orchard::Address from stored bytes
+            let recipient_addr = orchard::Address::from_raw_address_bytes(&note.recipient);
+            if recipient_addr.is_none().into() {
+                tracing::error!("Failed to reconstruct address for note {}", idx);
+                return Err(OrchardError::TransactionBuild(
+                    format!("Invalid recipient address data for note {}", idx)
+                ));
+            }
+            let recipient_addr = recipient_addr.unwrap();
+
+            // Reconstruct Rho from stored bytes
+            let rho = orchard::note::Rho::from_bytes(&note.rho);
+            if rho.is_none().into() {
+                tracing::error!("Failed to reconstruct rho for note {}", idx);
+                return Err(OrchardError::TransactionBuild(
+                    format!("Invalid rho data for note {}", idx)
+                ));
+            }
+            let rho = rho.unwrap();
+
+            // Reconstruct RandomSeed from stored bytes
+            let rseed = orchard::note::RandomSeed::from_bytes(note.rseed, &rho);
+            if rseed.is_none().into() {
+                tracing::error!("Failed to reconstruct rseed for note {}", idx);
+                return Err(OrchardError::TransactionBuild(
+                    format!("Invalid rseed data for note {}", idx)
+                ));
+            }
+            let rseed = rseed.unwrap();
+
+            // Reconstruct the Note
+            let value = NoteValue::from_raw(note.value_zatoshis);
+            let orchard_note = orchard::Note::from_parts(recipient_addr, value, rho, rseed);
+            if orchard_note.is_none().into() {
+                tracing::error!("Failed to reconstruct note {}", idx);
+                return Err(OrchardError::TransactionBuild(
+                    format!("Failed to reconstruct Orchard note {}", idx)
+                ));
+            }
+            let orchard_note = orchard_note.unwrap();
+
+            // Add the spend
+            match builder.add_spend(fvk.clone(), orchard_note, merkle_path.clone()) {
+                Ok(_) => {
+                    tracing::debug!(
+                        "Added spend {}: value={} zatoshis",
+                        idx,
+                        note.value_zatoshis
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("Failed to add spend {}: {:?}", idx, e);
+                    return Err(OrchardError::TransactionBuild(
+                        format!("Failed to add spend: {:?}", e)
+                    ));
+                }
+            }
+        }
+
+        // For deshielding, we need to add a dummy Orchard output to balance the bundle
+        // The actual payment goes to transparent output
+        // Add change output to sender (if any)
+        let ovk = Some(spending_key.to_ovk());
+        if change_amount > 0 {
+            let change_diversifier = orchard::keys::Diversifier::from_bytes([0u8; 11]);
+            let change_address = fvk.address(change_diversifier, Scope::Internal);
+            let change_value = NoteValue::from_raw(change_amount);
+
+            builder.add_output(ovk.clone(), change_address, change_value, [0u8; 512])
+                .map_err(|e| OrchardError::TransactionBuild(format!("Failed to add change output: {:?}", e)))?;
+
+            tracing::info!("Added shielded change output: {} zatoshis", change_amount);
+        }
+
+        // Build the Orchard bundle
+        tracing::info!("Building Orchard bundle for deshielding...");
+        let (unauthorized_bundle, _meta) = builder
+            .build::<i64>(&mut OsRng)
+            .map_err(|e| OrchardError::TransactionBuild(format!("Failed to build bundle: {:?}", e)))?
+            .ok_or_else(|| OrchardError::TransactionBuild("Empty bundle".to_string()))?;
+
+        let vb = *unauthorized_bundle.value_balance();
+        tracing::info!(
+            "Bundle built successfully: {} actions in bundle, value_balance={} (expected: {} = payment {} + fee {})",
+            unauthorized_bundle.actions().len(),
+            vb,
+            proposal.amount_zatoshis as i64 + proposal.fee_zatoshis as i64,
+            proposal.amount_zatoshis,
+            proposal.fee_zatoshis
+        );
+
+        // For deshielding, value_balance should be POSITIVE (funds flowing out of Orchard pool)
+        // value_balance = sum(spends) - sum(outputs) = total_input - change = payment + fee
+        let expected_vb = proposal.amount_zatoshis as i64 + proposal.fee_zatoshis as i64;
+        if vb != expected_vb {
+            tracing::error!(
+                "CRITICAL: Orchard bundle value_balance mismatch! got={}, expected={}, total_input={}, change={}",
+                vb, expected_vb, total_input, change_amount
+            );
+        }
+
+        // Build transparent output for the recipient
+        let transparent_output = self.build_transparent_output(&proposal.to_address, proposal.amount_zatoshis)?;
+
+        // Create proof FIRST (following the same pattern as working Z→Z transfers)
+        tracing::info!("Creating Orchard proof for deshielding...");
+        let proof_start = std::time::Instant::now();
+        let proven_bundle = unauthorized_bundle
+            .create_proof(pk, &mut OsRng)
+            .map_err(|e| OrchardError::TransactionBuild(format!("Failed to create proof: {:?}", e)))?;
+        tracing::info!("Proof created in {:.2}s", proof_start.elapsed().as_secs_f64());
+
+        // Compute sighash AFTER creating proof (from proven bundle, like Z→Z)
+        // For deshielding, we need to include transparent outputs in the sighash
+        let sighash = self.compute_deshielding_sighash(
+            &transparent_output,
+            proposal.expiry_height as u32,
+            self.network.consensus_branch_id(),
+            &proven_bundle,
+        )?;
+        tracing::info!("Computed deshielding sighash: {}", hex::encode(&sighash));
+
+        // Apply signatures
+        let saks: Vec<orchard::keys::SpendAuthorizingKey> = selected_notes_with_paths
+            .iter()
+            .map(|_| orchard::keys::SpendAuthorizingKey::from(spending_key.sk()))
+            .collect();
+
+        tracing::info!("Applying {} spend authorization signatures", saks.len());
+        let authorized_bundle = proven_bundle
+            .apply_signatures(OsRng, sighash, &saks)
+            .map_err(|e| OrchardError::TransactionBuild(format!("Failed to apply signatures: {:?}", e)))?;
+        tracing::info!("Signatures applied successfully");
+
+        // Serialize the transaction
+        // No transparent inputs
+        tx_data.push(0x00); // vin count
+
+        // Transparent outputs (one for the payment)
+        tx_data.extend_from_slice(&serialize_compact_size(1));
+        tx_data.extend_from_slice(&transparent_output);
+
+        // No Sapling
+        tx_data.push(0x00); // nSpendsSapling
+        tx_data.push(0x00); // nOutputsSapling
+
+        // Serialize Orchard bundle
+        self.serialize_orchard_bundle(&authorized_bundle, tx_data)?;
+
+        tracing::info!(
+            "Built deshielding transaction: {} spends, 1 transparent output, {} shielded change, {} bytes",
+            selected_notes_with_paths.len(),
+            if change_amount > 0 { "with" } else { "no" },
+            tx_data.len()
+        );
+
+        Ok(())
+    }
+
+    /// Build a transparent output (P2PKH) for deshielding
+    fn build_transparent_output(&self, address: &str, value_zatoshis: u64) -> OrchardResult<Vec<u8>> {
+        use sha2::{Digest, Sha256};
+
+        let mut output = Vec::new();
+
+        // Value (8 bytes, little-endian)
+        output.extend_from_slice(&(value_zatoshis as i64).to_le_bytes());
+
+        // Decode transparent address to get pubkey hash
+        let decoded = bs58::decode(address)
+            .into_vec()
+            .map_err(|e| OrchardError::TransactionBuild(format!("Invalid transparent address: {}", e)))?;
+
+        if decoded.len() < 26 {
+            return Err(OrchardError::TransactionBuild(
+                "Transparent address too short".to_string()
+            ));
+        }
+
+        // Verify checksum
+        let checksum = Sha256::digest(&Sha256::digest(&decoded[..22]));
+        if &checksum[..4] != &decoded[22..26] {
+            return Err(OrchardError::TransactionBuild(
+                "Invalid transparent address checksum".to_string()
+            ));
+        }
+
+        // Extract pubkey hash (bytes 2-22)
+        let pubkey_hash = &decoded[2..22];
+
+        // Build P2PKH script: OP_DUP OP_HASH160 <pubkey_hash> OP_EQUALVERIFY OP_CHECKSIG
+        let script_pubkey = [
+            0x76, // OP_DUP
+            0xa9, // OP_HASH160
+            0x14, // Push 20 bytes
+        ]
+        .iter()
+        .chain(pubkey_hash.iter())
+        .chain([
+            0x88, // OP_EQUALVERIFY
+            0xac, // OP_CHECKSIG
+        ].iter())
+        .copied()
+        .collect::<Vec<u8>>();
+
+        // Script length + script
+        output.extend_from_slice(&serialize_compact_size(script_pubkey.len() as u64));
+        output.extend_from_slice(&script_pubkey);
+
+        tracing::debug!(
+            "Built transparent output: {} zatoshis to {} (script: {})",
+            value_zatoshis,
+            address,
+            hex::encode(&script_pubkey)
+        );
+
+        Ok(output)
+    }
+
+    /// Compute sighash for deshielding transaction from unauthorized bundle
+    ///
+    /// This must be called BEFORE creating the proof, using the unauthorized bundle.
+    /// Following librustzcash pattern where sighash is computed from unauthed_tx.
+    fn compute_deshielding_sighash_from_unauth(
+        &self,
+        transparent_output: &[u8],
+        expiry_height: u32,
+        consensus_branch_id: u32,
+        bundle: &orchard::bundle::Bundle<InProgress<orchard::builder::Unproven, Unauthorized>, i64>,
+    ) -> OrchardResult<[u8; 32]> {
+        // T.1: header_digest
+        let mut header_data = Vec::new();
+        header_data.extend_from_slice(&TX_VERSION_WITH_OVERWINTERED.to_le_bytes());
+        header_data.extend_from_slice(&VERSION_GROUP_ID_V5.to_le_bytes());
+        header_data.extend_from_slice(&consensus_branch_id.to_le_bytes());
+        header_data.extend_from_slice(&0u32.to_le_bytes()); // lock_time
+        header_data.extend_from_slice(&expiry_height.to_le_bytes());
+        let header_digest = blake2b_256(b"ZTxIdHeadersHash", &header_data);
+
+        // T.2: transparent_sig_digest for SignableInput::Shielded with no transparent inputs
+        let prevouts_digest = blake2b_256(ZCASH_PREVOUTS_HASH, &[]);
+        let sequence_digest = blake2b_256(ZCASH_SEQUENCE_HASH, &[]);
+        let outputs_digest = blake2b_256(ZCASH_OUTPUTS_HASH, transparent_output);
+
+        let mut transparent_data = Vec::new();
+        transparent_data.extend_from_slice(&prevouts_digest);
+        transparent_data.extend_from_slice(&sequence_digest);
+        transparent_data.extend_from_slice(&outputs_digest);
+        let transparent_sig_digest = blake2b_256(ZCASH_TRANSPARENT_HASH, &transparent_data);
+
+        // T.3: sapling_digest (empty)
+        let sapling_digest = blake2b_256(b"ZTxIdSaplingHash", &[]);
+
+        // T.4: orchard_digest from unauthorized bundle
+        let orchard_commitment = bundle.commitment();
+        let orchard_digest: [u8; 32] = orchard_commitment.0.as_bytes().try_into()
+            .map_err(|_| OrchardError::TransactionBuild("Invalid orchard commitment".to_string()))?;
+
+        tracing::debug!("Deshielding sighash from unauth bundle:");
+        tracing::debug!("  header_digest: {}", hex::encode(&header_digest));
+        tracing::debug!("  transparent_sig_digest: {}", hex::encode(&transparent_sig_digest));
+        tracing::debug!("  sapling_digest: {}", hex::encode(&sapling_digest));
+        tracing::debug!("  orchard_digest: {}", hex::encode(&orchard_digest));
+
+        // Final sighash
+        let mut personalization = ZCASH_TX_HASH.to_vec();
+        personalization.extend_from_slice(&consensus_branch_id.to_le_bytes());
+
+        let mut sig_data = Vec::new();
+        sig_data.extend_from_slice(&header_digest);
+        sig_data.extend_from_slice(&transparent_sig_digest);
+        sig_data.extend_from_slice(&sapling_digest);
+        sig_data.extend_from_slice(&orchard_digest);
+
+        Ok(blake2b_256(&personalization, &sig_data))
+    }
+
+    /// Compute sighash for deshielding transaction (SignableInput::Shielded with transparent outputs)
+    ///
+    /// According to ZIP 244:
+    /// - When there are no transparent inputs (but there are transparent outputs),
+    ///   transparent_sig_digest = hash_transparent_txid_data(txid_digests)
+    /// - This is simpler than the case with transparent inputs
+    fn compute_deshielding_sighash<V: Copy + Into<i64>>(
+        &self,
+        transparent_output: &[u8],
+        expiry_height: u32,
+        consensus_branch_id: u32,
+        bundle: &orchard::bundle::Bundle<InProgress<Proof, Unauthorized>, V>,
+    ) -> OrchardResult<[u8; 32]> {
+        // T.1: header_digest
+        let mut header_data = Vec::new();
+        header_data.extend_from_slice(&TX_VERSION_WITH_OVERWINTERED.to_le_bytes());
+        header_data.extend_from_slice(&VERSION_GROUP_ID_V5.to_le_bytes());
+        header_data.extend_from_slice(&consensus_branch_id.to_le_bytes());
+        header_data.extend_from_slice(&0u32.to_le_bytes()); // lock_time
+        header_data.extend_from_slice(&expiry_height.to_le_bytes());
+        let header_digest = blake2b_256(b"ZTxIdHeadersHash", &header_data);
+
+        // T.2: transparent_sig_digest for SignableInput::Shielded with no transparent inputs
+        // According to ZIP 244 Section S.2:
+        // When bundle.vin.is_empty(), use hash_transparent_txid_data(Some(txid_digests))
+        // This hashes: prevouts_digest || sequence_digest || outputs_digest
+
+        // prevouts_digest - empty since no inputs
+        let prevouts_digest = blake2b_256(ZCASH_PREVOUTS_HASH, &[]);
+        // sequence_digest - empty since no inputs
+        let sequence_digest = blake2b_256(ZCASH_SEQUENCE_HASH, &[]);
+        // outputs_digest - hash of transparent outputs
+        let outputs_digest = blake2b_256(ZCASH_OUTPUTS_HASH, transparent_output);
+
+        // hash_transparent_txid_data format: just concatenate the three digests
+        let mut transparent_data = Vec::new();
+        transparent_data.extend_from_slice(&prevouts_digest);
+        transparent_data.extend_from_slice(&sequence_digest);
+        transparent_data.extend_from_slice(&outputs_digest);
+        let transparent_sig_digest = blake2b_256(ZCASH_TRANSPARENT_HASH, &transparent_data);
+
+        // T.3: sapling_digest (empty)
+        let sapling_digest = blake2b_256(b"ZTxIdSaplingHash", &[]);
+
+        // T.4: orchard_digest
+        let orchard_digest = compute_orchard_digest_from_proven(bundle);
+
+        tracing::debug!("Deshielding sighash components:");
+        tracing::debug!("  header_digest: {}", hex::encode(&header_digest));
+        tracing::debug!("  prevouts_digest: {}", hex::encode(&prevouts_digest));
+        tracing::debug!("  sequence_digest: {}", hex::encode(&sequence_digest));
+        tracing::debug!("  outputs_digest: {}", hex::encode(&outputs_digest));
+        tracing::debug!("  transparent_sig_digest: {}", hex::encode(&transparent_sig_digest));
+        tracing::debug!("  sapling_digest: {}", hex::encode(&sapling_digest));
+        tracing::debug!("  orchard_digest: {}", hex::encode(&orchard_digest));
+
+        // Final sighash
+        let mut personalization = ZCASH_TX_HASH.to_vec();
+        personalization.extend_from_slice(&consensus_branch_id.to_le_bytes());
+
+        let mut sig_data = Vec::new();
+        sig_data.extend_from_slice(&header_digest);
+        sig_data.extend_from_slice(&transparent_sig_digest);
+        sig_data.extend_from_slice(&sapling_digest);
+        sig_data.extend_from_slice(&orchard_digest);
+
+        Ok(blake2b_256(&personalization, &sig_data))
     }
 
     /// Create merkle path for a note
@@ -1936,6 +2379,24 @@ pub fn sign_transparent_inputs_with_bundle(
 
     tracing::info!("Signed {} transparent inputs for shielding", signed_inputs.len());
     Ok(signed_inputs)
+}
+
+/// Check if an address is a Zcash transparent address (t1... or t3...)
+pub fn is_transparent_address(address: &str) -> bool {
+    // Zcash mainnet transparent addresses start with t1 (P2PKH) or t3 (P2SH)
+    // Length should be 34-35 characters for base58check encoded address
+    (address.starts_with("t1") || address.starts_with("t3"))
+        && address.len() >= 34
+        && address.len() <= 36
+        && address.chars().all(|c| {
+            // Base58 characters (no 0, O, I, l)
+            c.is_alphanumeric() && c != '0' && c != 'O' && c != 'I' && c != 'l'
+        })
+}
+
+/// Check if an address is a Zcash unified address (u1...)
+pub fn is_unified_address(address: &str) -> bool {
+    address.starts_with("u1") && address.len() >= 100
 }
 
 #[cfg(test)]

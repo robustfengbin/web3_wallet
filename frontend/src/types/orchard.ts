@@ -148,6 +148,7 @@ export interface OrchardTransferProposal {
   fee_zec: number;
   fund_source: string;
   is_shielding: boolean;
+  is_deshielding: boolean;
   to_address: string;
   memo?: string;
   expiry_height: number;
@@ -163,6 +164,7 @@ export interface ExecuteTransferRequest {
   memo?: string;
   fund_source: string;
   is_shielding: boolean;
+  is_deshielding: boolean;
   expiry_height: number;
 }
 

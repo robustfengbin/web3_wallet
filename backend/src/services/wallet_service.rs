@@ -1233,8 +1233,8 @@ impl WalletService {
                 tracing::info!("[Background Sync] Next sync in 5 minutes...");
                 tracing::info!("[Background Sync] ═══════════════════════════════════════════════════");
 
-                // Wait 5 minutes before next sync
-                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                // Wait 1 minute before next sync
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             }
         });
     }

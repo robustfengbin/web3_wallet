@@ -16,7 +16,7 @@ import type {
   ExecuteTransferRequest,
   OrchardTransferProposal,
 } from '../../../types/orchard';
-import { isUnifiedAddress, zecToZatoshis, zatoshisToZec } from '../../../types/orchard';
+import { isUnifiedAddress, isTransparentAddress, zecToZatoshis, zatoshisToZec } from '../../../types/orchard';
 import type { Wallet } from '../../../types';
 
 export function PrivacyTransfer() {
@@ -160,17 +160,32 @@ export function PrivacyTransfer() {
     }
   };
 
+  // Check if current address is for deshielding (transparent address)
+  const isDeshielding = isTransparentAddress(toAddress);
+
   // Validate form
   const validateForm = (): string | null => {
     if (!toAddress) {
       return t('zcash.orchard.errors.addressRequired', 'Recipient address is required');
     }
 
-    if (!isUnifiedAddress(toAddress)) {
+    // Accept both unified addresses (u1...) and transparent addresses (t1.../t3...)
+    if (!isUnifiedAddress(toAddress) && !isTransparentAddress(toAddress)) {
       return t(
         'zcash.orchard.errors.invalidAddress',
-        'Please enter a valid unified address (u1...)'
+        'Please enter a valid address (u1... for shielded, t1... for transparent)'
       );
+    }
+
+    // For deshielding, must have shielded balance
+    if (isDeshielding) {
+      const shieldedBalance = balance?.shielded_balance?.spendable_zatoshis || 0;
+      if (shieldedBalance === 0) {
+        return t(
+          'zcash.orchard.errors.noDeshieldingBalance',
+          'Deshielding requires shielded balance but none is available'
+        );
+      }
     }
 
     if (!amount || parseFloat(amount) <= 0) {
@@ -178,10 +193,15 @@ export function PrivacyTransfer() {
     }
 
     const amountZec = parseFloat(amount);
-    const availableBalance = getAvailableBalance();
+    // For deshielding, only shielded balance is available
+    const availableBalance = isDeshielding
+      ? (balance?.shielded_balance?.spendable_zatoshis || 0) / 100_000_000
+      : getAvailableBalance();
 
     if (amountZec > availableBalance) {
-      const sourceLabel = fundSource === 'transparent'
+      const sourceLabel = isDeshielding
+        ? t('zcash.orchard.shieldedOnly', 'shielded')
+        : fundSource === 'transparent'
         ? t('zcash.orchard.transparentOnly', 'transparent')
         : fundSource === 'shielded'
         ? t('zcash.orchard.shieldedOnly', 'shielded')
@@ -250,6 +270,7 @@ export function PrivacyTransfer() {
           memo: pendingProposal.memo,
           fund_source: pendingProposal.fund_source,
           is_shielding: pendingProposal.is_shielding,
+          is_deshielding: pendingProposal.is_deshielding,
           expiry_height: pendingProposal.expiry_height,
         }
       );
@@ -467,13 +488,21 @@ export function PrivacyTransfer() {
                 type="text"
                 value={toAddress}
                 onChange={(e) => setToAddress(e.target.value)}
-                placeholder="u1..."
+                placeholder={t('zcash.orchard.addressPlaceholder', 'u1... or t1...')}
                 disabled={submitting}
                 className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-yellow-500 focus:border-yellow-500 disabled:bg-gray-100 disabled:cursor-not-allowed font-mono text-sm"
               />
               <p className="mt-1 text-xs text-gray-500">
-                {t('zcash.orchard.addressHint', 'Enter a unified address (u1...) for full privacy')}
+                {t('zcash.orchard.addressHint', 'Enter u1... for shielded transfer or t1... for deshielding (withdraw to transparent)')}
               </p>
+              {isDeshielding && (
+                <div className="mt-2 flex items-start gap-2 p-2 bg-orange-50 rounded-lg border border-orange-200">
+                  <AlertTriangle className="w-4 h-4 text-orange-600 flex-shrink-0 mt-0.5" />
+                  <p className="text-xs text-orange-700">
+                    {t('zcash.orchard.deshieldingWarning', 'Deshielding (Z→T): Funds will be sent to a transparent address. The recipient address and amount will be publicly visible on the blockchain.')}
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Amount */}
@@ -486,7 +515,7 @@ export function PrivacyTransfer() {
                   type="number"
                   value={amount}
                   onChange={(e) => setAmount(e.target.value)}
-                  placeholder="0.00000000"
+                  placeholder={t('zcash.orchard.amountPlaceholder', '0.00000000')}
                   step="0.00000001"
                   min="0"
                   disabled={submitting}
@@ -617,14 +646,20 @@ export function PrivacyTransfer() {
                         ? 'bg-blue-100 text-blue-800'
                         : 'bg-gray-100 text-gray-800'
                     }`}>
-                      {pendingProposal.fund_source === 'shielded' ? 'Shielded' :
-                       pendingProposal.fund_source === 'transparent' ? 'Transparent' : 'Auto'}
+                      {pendingProposal.fund_source === 'shielded' ? t('zcash.orchard.fundShielded', 'Shielded') :
+                       pendingProposal.fund_source === 'transparent' ? t('zcash.orchard.fundTransparent', 'Transparent') : t('zcash.orchard.fundAuto', 'Auto')}
                     </span>
                   </div>
                   {pendingProposal.is_shielding && (
                     <div className="flex items-center gap-2 text-sm text-blue-600">
                       <Lock className="w-4 h-4" />
                       {t('zcash.orchard.shieldingOperation', 'Shielding operation (T → Z)')}
+                    </div>
+                  )}
+                  {pendingProposal.is_deshielding && (
+                    <div className="flex items-center gap-2 text-sm text-orange-600">
+                      <AlertTriangle className="w-4 h-4" />
+                      {t('zcash.orchard.deshieldingOperation', 'Deshielding operation (Z → T) - Amount will be public')}
                     </div>
                   )}
                 </div>

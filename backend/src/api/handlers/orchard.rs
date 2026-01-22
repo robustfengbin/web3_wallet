@@ -304,6 +304,7 @@ pub struct TransferProposalResponse {
     pub fee_zec: f64,
     pub fund_source: String,
     pub is_shielding: bool,
+    pub is_deshielding: bool,
     pub to_address: String,
     pub memo: Option<String>,
     pub expiry_height: u64,
@@ -355,6 +356,7 @@ pub async fn initiate_orchard_transfer(
         fee_zec: proposal.fee_zatoshis as f64 / 100_000_000.0,
         fund_source: format!("{:?}", proposal.fund_source).to_lowercase(),
         is_shielding: proposal.is_shielding,
+        is_deshielding: proposal.is_deshielding,
         to_address: proposal.to_address.clone(),
         memo: proposal.memo.clone(),
         expiry_height: proposal.expiry_height,
@@ -374,6 +376,8 @@ pub struct ExecuteTransferRequest {
     pub memo: Option<String>,
     pub fund_source: String,
     pub is_shielding: bool,
+    #[serde(default)]
+    pub is_deshielding: bool,
     pub expiry_height: u64,
 }
 
@@ -413,11 +417,12 @@ pub async fn execute_orchard_transfer(
     }
 
     tracing::info!(
-        "Executing Orchard transfer: proposal={}, amount_zatoshis={}, fee_zatoshis={}, is_shielding={}",
+        "Executing Orchard transfer: proposal={}, amount_zatoshis={}, fee_zatoshis={}, is_shielding={}, is_deshielding={}",
         proposal_id,
         req.amount_zatoshis,
         req.fee_zatoshis,
-        req.is_shielding
+        req.is_shielding,
+        req.is_deshielding
     );
 
     // CRITICAL SAFETY CHECK: Prevent zero-value transactions
@@ -486,6 +491,7 @@ pub async fn execute_orchard_transfer(
         fee_zatoshis: req.fee_zatoshis,
         fund_source,
         is_shielding: req.is_shielding,
+        is_deshielding: req.is_deshielding,
         to_address: req.to_address.clone(),
         memo: req.memo.clone(),
         expiry_height: req.expiry_height,
