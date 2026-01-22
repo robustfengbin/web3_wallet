@@ -12,12 +12,14 @@ pub mod scanner;
 pub mod sync;
 pub mod transfer;
 pub mod tree;
+pub mod witness_sync;
 
 pub use address::UnifiedAddressInfo;
 pub use builder::{OrchardTransactionBuilder, OrchardTransferParams};
 pub use keys::OrchardViewingKey;
 pub use scanner::ScanProgress;
 pub use transfer::init_proving_key;
+pub use witness_sync::WitnessSyncManager;
 
 /// Orchard protocol constants
 pub mod constants {
@@ -81,6 +83,12 @@ pub enum OrchardError {
 impl From<OrchardError> for crate::error::AppError {
     fn from(err: OrchardError) -> Self {
         crate::error::AppError::BlockchainError(err.to_string())
+    }
+}
+
+impl From<tree::TreeError> for OrchardError {
+    fn from(err: tree::TreeError) -> Self {
+        OrchardError::Scanner(err.to_string())
     }
 }
 

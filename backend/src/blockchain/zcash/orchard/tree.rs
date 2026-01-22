@@ -23,7 +23,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Cursor;
 use subtle::CtOption;
-use zcash_primitives::merkle_tree::{read_commitment_tree, write_commitment_tree};
+use zcash_primitives::merkle_tree::{
+    read_commitment_tree, write_commitment_tree,
+    read_incremental_witness, write_incremental_witness,
+};
 
 /// Orchard tree depth
 pub const ORCHARD_TREE_DEPTH: u8 = 32;
@@ -65,7 +68,6 @@ impl OrchardTreeTracker {
         }
     }
 
-    /// Create a tree tracker initialized from frontier data
     ///
     /// The frontier is obtained from z_gettreestate RPC.
     /// This allows us to continue building from a known tree state
@@ -305,6 +307,111 @@ impl OrchardTreeTracker {
             // Note: Full tree serialization would be complex
             // For now, we'll rely on rescanning from a checkpoint
         }
+    }
+
+    // =========================================================================
+    // Serialization methods for incremental sync
+    // =========================================================================
+
+    /// Serialize the commitment tree to bytes
+    pub fn serialize_tree(&self) -> Result<Vec<u8>, TreeError> {
+        let mut buffer = Vec::new();
+        write_commitment_tree(&self.tree, &mut buffer)
+            .map_err(|e| TreeError::InvalidCommitment(format!("Failed to serialize tree: {}", e)))?;
+        Ok(buffer)
+    }
+
+    /// Deserialize and restore the commitment tree from bytes
+    pub fn deserialize_tree(data: &[u8]) -> Result<CommitmentTree<MerkleHashOrchard, ORCHARD_TREE_DEPTH>, TreeError> {
+        read_commitment_tree(&mut Cursor::new(data))
+            .map_err(|e| TreeError::InvalidCommitment(format!("Failed to deserialize tree: {}", e)))
+    }
+
+    /// Restore tree tracker from serialized data
+    pub fn from_serialized(
+        tree_data: &[u8],
+        position: u64,
+        block_height: u64,
+    ) -> Result<Self, TreeError> {
+        let tree = Self::deserialize_tree(tree_data)?;
+
+        tracing::info!(
+            "[OrchardTree] Restored from serialized data: height={}, position={}, tree_size={}",
+            block_height,
+            position,
+            tree.size()
+        );
+
+        Ok(Self {
+            tree,
+            witnesses: HashMap::new(),
+            current_position: position,
+            last_block_height: block_height,
+        })
+    }
+
+    /// Serialize a single witness to bytes
+    pub fn serialize_witness(witness: &IncrementalWitness<MerkleHashOrchard, ORCHARD_TREE_DEPTH>) -> Result<Vec<u8>, TreeError> {
+        let mut buffer = Vec::new();
+        write_incremental_witness(witness, &mut buffer)
+            .map_err(|e| TreeError::InvalidWitness(format!("Failed to serialize witness: {}", e)))?;
+        Ok(buffer)
+    }
+
+    /// Deserialize a witness from bytes
+    pub fn deserialize_witness(data: &[u8]) -> Result<IncrementalWitness<MerkleHashOrchard, ORCHARD_TREE_DEPTH>, TreeError> {
+        read_incremental_witness(&mut Cursor::new(data))
+            .map_err(|e| TreeError::InvalidWitness(format!("Failed to deserialize witness: {}", e)))
+    }
+
+    /// Get serialized witness for a position
+    pub fn get_serialized_witness(&self, position: u64) -> Option<Vec<u8>> {
+        let witness = self.witnesses.get(&position)?;
+        Self::serialize_witness(witness).ok()
+    }
+
+    /// Add a pre-existing witness (for restoring from database)
+    pub fn add_witness(&mut self, position: u64, witness: IncrementalWitness<MerkleHashOrchard, ORCHARD_TREE_DEPTH>) {
+        self.witnesses.insert(position, witness);
+    }
+
+    /// Add a witness from serialized data
+    pub fn add_serialized_witness(&mut self, position: u64, data: &[u8]) -> Result<(), TreeError> {
+        let witness = Self::deserialize_witness(data)?;
+        self.witnesses.insert(position, witness);
+        Ok(())
+    }
+
+    /// Create a new IncrementalWitness from current tree state
+    /// This is used when discovering new notes or restoring known positions
+    pub fn create_witness_from_current(&self) -> Option<IncrementalWitness<MerkleHashOrchard, ORCHARD_TREE_DEPTH>> {
+        IncrementalWitness::from_tree(self.tree.clone())
+    }
+
+    /// Get all witnesses as serialized data (for persistence)
+    pub fn get_all_serialized_witnesses(&self) -> Result<Vec<(u64, Vec<u8>)>, TreeError> {
+        let mut result = Vec::new();
+        for (position, witness) in &self.witnesses {
+            let data = Self::serialize_witness(witness)?;
+            result.push((*position, data));
+        }
+        Ok(result)
+    }
+
+    /// Get witness data and serialized state for a position
+    pub fn get_witness_with_state(&self, position: u64) -> Option<(WitnessData, Vec<u8>)> {
+        let witness = self.witnesses.get(&position)?;
+        let path = witness.path()?;
+        let path_position: u64 = path.position().into();
+
+        let witness_data = WitnessData {
+            position: path_position,
+            auth_path: path.path_elems().iter().map(|h| h.to_bytes()).collect(),
+            root: witness.root().to_bytes(),
+        };
+
+        let serialized = Self::serialize_witness(witness).ok()?;
+        Some((witness_data, serialized))
     }
 }
 

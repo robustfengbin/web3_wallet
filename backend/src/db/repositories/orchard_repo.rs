@@ -42,6 +42,23 @@ pub struct OrchardSyncState {
     pub last_witness_height: u64,
 }
 
+/// Global tree state for incremental witness sync
+#[derive(Debug, Clone)]
+pub struct OrchardTreeState {
+    pub tree_data: Vec<u8>,
+    pub tree_height: u64,
+    pub tree_size: u64,
+}
+
+/// Note info with witness state for incremental sync
+#[derive(Debug, Clone)]
+pub struct NoteWitnessInfo {
+    pub nullifier: String,
+    pub block_height: u64,
+    pub witness_position: Option<u64>,
+    pub witness_state: Option<Vec<u8>>,
+}
+
 pub struct OrchardRepository {
     pool: MySqlPool,
 }
@@ -409,5 +426,228 @@ impl OrchardRepository {
         .fetch_optional(&self.pool)
         .await?;
         Ok(result.map(|(c,)| c > 0).unwrap_or(false))
+    }
+
+    // =========================================================================
+    // Tree State Operations (for incremental witness sync)
+    // =========================================================================
+
+    /// Save global tree state
+    /// Uses REPLACE INTO to ensure only one row exists
+    pub async fn save_tree_state(&self, tree_data: &[u8], tree_height: u64, tree_size: u64) -> AppResult<()> {
+        // First delete any existing rows, then insert new one
+        // This ensures we always have exactly one row regardless of id
+        sqlx::query("DELETE FROM orchard_tree_state")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query(
+            "INSERT INTO orchard_tree_state (id, tree_data, tree_height, tree_size) VALUES (1, ?, ?, ?)"
+        )
+        .bind(tree_data)
+        .bind(tree_height)
+        .bind(tree_size)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Load global tree state (only one row in table)
+    pub async fn load_tree_state(&self) -> AppResult<Option<OrchardTreeState>> {
+        let result: Option<(Vec<u8>, u64, u64)> = sqlx::query_as(
+            "SELECT tree_data, tree_height, tree_size FROM orchard_tree_state LIMIT 1"
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(result.map(|(tree_data, tree_height, tree_size)| OrchardTreeState {
+            tree_data,
+            tree_height,
+            tree_size,
+        }))
+    }
+
+    /// Delete tree state (for reset/rebuild)
+    pub async fn delete_tree_state(&self) -> AppResult<()> {
+        sqlx::query("DELETE FROM orchard_tree_state WHERE id = 1")
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // Witness State Operations (for incremental witness sync)
+    // =========================================================================
+
+    /// Save witness state for a note (by nullifier)
+    pub async fn save_witness_state(&self, nullifier: &str, witness_state: &[u8]) -> AppResult<bool> {
+        let result = sqlx::query(
+            "UPDATE orchard_notes SET witness_state = ? WHERE nullifier = ?"
+        )
+        .bind(witness_state)
+        .bind(nullifier)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Load witness states for all unspent notes of specified wallets
+    pub async fn load_witness_states(&self, wallet_ids: &[i32]) -> AppResult<Vec<NoteWitnessInfo>> {
+        if wallet_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Build placeholders for IN clause
+        let placeholders: Vec<String> = wallet_ids.iter().map(|_| "?".to_string()).collect();
+        let query = format!(
+            r#"
+            SELECT nullifier, block_height, witness_position, witness_state
+            FROM orchard_notes
+            WHERE wallet_id IN ({}) AND is_spent = FALSE
+            ORDER BY block_height ASC
+            "#,
+            placeholders.join(",")
+        );
+
+        let mut q = sqlx::query_as::<_, (String, u64, Option<u64>, Option<Vec<u8>>)>(&query);
+        for id in wallet_ids {
+            q = q.bind(*id);
+        }
+
+        let rows = q.fetch_all(&self.pool).await?;
+
+        Ok(rows.into_iter().map(|(nullifier, block_height, witness_position, witness_state)| {
+            NoteWitnessInfo {
+                nullifier,
+                block_height,
+                witness_position,
+                witness_state,
+            }
+        }).collect())
+    }
+
+    /// Get minimum block height among all unspent notes for specified wallets
+    pub async fn get_min_note_height(&self, wallet_ids: &[i32]) -> AppResult<Option<u64>> {
+        if wallet_ids.is_empty() {
+            return Ok(None);
+        }
+
+        let placeholders: Vec<String> = wallet_ids.iter().map(|_| "?".to_string()).collect();
+        let query = format!(
+            "SELECT MIN(block_height) FROM orchard_notes WHERE wallet_id IN ({}) AND is_spent = FALSE",
+            placeholders.join(",")
+        );
+
+        let mut q = sqlx::query_as::<_, (Option<u64>,)>(&query);
+        for id in wallet_ids {
+            q = q.bind(*id);
+        }
+
+        let result = q.fetch_optional(&self.pool).await?;
+        Ok(result.and_then(|(h,)| h))
+    }
+
+    /// Get notes that have witness_position but no witness_state
+    /// These notes need to be rescanned from their block_height to build proper witnesses
+    pub async fn get_notes_without_witness_state(&self, wallet_ids: &[i32]) -> AppResult<Vec<NoteWitnessInfo>> {
+        if wallet_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders: Vec<String> = wallet_ids.iter().map(|_| "?".to_string()).collect();
+        let query = format!(
+            r#"
+            SELECT nullifier, block_height, witness_position, witness_state
+            FROM orchard_notes
+            WHERE wallet_id IN ({}) AND is_spent = FALSE
+              AND witness_position IS NOT NULL
+              AND witness_state IS NULL
+            ORDER BY block_height ASC
+            "#,
+            placeholders.join(",")
+        );
+
+        let mut q = sqlx::query_as::<_, (String, u64, Option<u64>, Option<Vec<u8>>)>(&query);
+        for id in wallet_ids {
+            q = q.bind(*id);
+        }
+
+        let rows = q.fetch_all(&self.pool).await?;
+
+        Ok(rows.into_iter().map(|(nullifier, block_height, witness_position, witness_state)| {
+            NoteWitnessInfo {
+                nullifier,
+                block_height,
+                witness_position,
+                witness_state,
+            }
+        }).collect())
+    }
+
+    /// Get minimum block_height of notes without witness_state
+    pub async fn get_min_height_notes_without_witness_state(&self, wallet_ids: &[i32]) -> AppResult<Option<u64>> {
+        if wallet_ids.is_empty() {
+            return Ok(None);
+        }
+
+        let placeholders: Vec<String> = wallet_ids.iter().map(|_| "?".to_string()).collect();
+        let query = format!(
+            r#"
+            SELECT MIN(block_height) FROM orchard_notes
+            WHERE wallet_id IN ({}) AND is_spent = FALSE
+              AND witness_position IS NOT NULL
+              AND witness_state IS NULL
+            "#,
+            placeholders.join(",")
+        );
+
+        let mut q = sqlx::query_as::<_, (Option<u64>,)>(&query);
+        for id in wallet_ids {
+            q = q.bind(*id);
+        }
+
+        let result = q.fetch_optional(&self.pool).await?;
+        Ok(result.and_then(|(h,)| h))
+    }
+
+    /// Batch save witness states for multiple notes
+    pub async fn batch_save_witness_states(&self, updates: &[(String, Vec<u8>)]) -> AppResult<usize> {
+        if updates.is_empty() {
+            return Ok(0);
+        }
+
+        let mut saved = 0;
+        for (nullifier, witness_state) in updates {
+            if self.save_witness_state(nullifier, witness_state).await? {
+                saved += 1;
+            }
+        }
+        Ok(saved)
+    }
+
+    /// Update both witness result (auth_path, root) and witness state for a note
+    pub async fn update_witness_full(
+        &self,
+        nullifier: &str,
+        position: u64,
+        auth_path: &str,
+        root: &str,
+        witness_state: &[u8],
+    ) -> AppResult<bool> {
+        let result = sqlx::query(
+            r#"
+            UPDATE orchard_notes
+            SET witness_position = ?, witness_auth_path = ?, witness_root = ?, witness_state = ?
+            WHERE nullifier = ?
+            "#
+        )
+        .bind(position)
+        .bind(auth_path)
+        .bind(root)
+        .bind(witness_state)
+        .bind(nullifier)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
     }
 }

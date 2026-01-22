@@ -325,6 +325,48 @@ pub async fn run_migrations(pool: &MySqlPool) -> AppResult<()> {
         tracing::info!("Expanded from_address and to_address columns to VARCHAR(512) for Zcash addresses");
     }
 
+    // Create orchard_tree_state table for storing global commitment tree state
+    // This enables incremental witness sync without rescanning from note birth height
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS orchard_tree_state (
+            id INT PRIMARY KEY DEFAULT 1,
+            tree_data MEDIUMBLOB NOT NULL COMMENT 'Serialized CommitmentTree frontier',
+            tree_height BIGINT UNSIGNED NOT NULL COMMENT 'Block height of tree state',
+            tree_size BIGINT UNSIGNED NOT NULL COMMENT 'Number of commitments in tree',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Add witness_state column to orchard_notes for incremental witness sync
+    // This stores serialized IncrementalWitness that can be updated incrementally
+    let witness_state_column_exists: Option<(String,)> = sqlx::query_as(
+        r#"
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+        AND TABLE_NAME = 'orchard_notes'
+        AND COLUMN_NAME = 'witness_state'
+        "#,
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    if witness_state_column_exists.is_none() {
+        sqlx::query(
+            r#"
+            ALTER TABLE orchard_notes
+            ADD COLUMN witness_state MEDIUMBLOB NULL
+                COMMENT 'Serialized IncrementalWitness for incremental updates'
+            "#
+        )
+        .execute(pool)
+        .await?;
+        tracing::info!("Added witness_state column to orchard_notes table for incremental sync");
+    }
+
     tracing::info!("Database migrations completed successfully");
     Ok(())
 }

@@ -7,8 +7,8 @@ use sqlx::MySqlPool;
 use crate::blockchain::zcash::orchard::{
     keys::OrchardKeyManager,
     scanner::ShieldedBalance,
-    sync::{OrchardSyncService, SyncConfig},
     transfer::{FundSource, NetworkType, OrchardTransferService, TransferProposal, TransferResult},
+    witness_sync::WitnessSyncManager,
     ScanProgress, ShieldedPool, UnifiedAddressInfo,
 };
 use crate::blockchain::ChainRegistry;
@@ -28,8 +28,8 @@ pub struct WalletService {
     wallet_repo: WalletRepository,
     chain_registry: Arc<ChainRegistry>,
     security_config: SecurityConfig,
-    /// Orchard sync service for scanning shielded transactions
-    orchard_sync: Arc<RwLock<Option<OrchardSyncService>>>,
+    /// Witness sync manager for Orchard shielded transactions
+    witness_sync: Arc<RwLock<Option<WitnessSyncManager>>>,
     /// Database pool for persistence
     db_pool: MySqlPool,
     /// Transfer repository for recording transfers
@@ -48,40 +48,52 @@ impl WalletService {
             wallet_repo,
             chain_registry,
             security_config,
-            orchard_sync: Arc::new(RwLock::new(None)),
+            witness_sync: Arc::new(RwLock::new(None)),
             db_pool,
             transfer_repo,
         }
     }
 
-    /// Initialize Orchard sync service with RPC configuration and database persistence
+    /// Initialize Orchard witness sync manager with RPC configuration and database persistence
     pub async fn init_orchard_sync(&self, rpc_url: &str, rpc_user: Option<&str>, rpc_password: Option<&str>) -> AppResult<()> {
-        let config = SyncConfig {
-            rpc_url: rpc_url.to_string(),
-            rpc_user: rpc_user.map(|s| s.to_string()),
-            rpc_password: rpc_password.map(|s| s.to_string()),
-            batch_size: 500,  // Process 500 blocks per scan round
-            birthday_height: 1_687_104, // Orchard activation height
-            parallel_fetches: 25,  // 25 blocks per batch (20 parallel batches)
-        };
+        let db_repo = Arc::new(crate::db::repositories::OrchardRepository::new(self.db_pool.clone()));
 
-        // Use new_with_db for database persistence
-        let sync_service = OrchardSyncService::new_with_db(config, self.db_pool.clone());
+        // Create witness sync manager
+        let witness_manager = WitnessSyncManager::new(
+            db_repo,
+            rpc_url.to_string(),
+            rpc_user.unwrap_or("").to_string(),
+            rpc_password.unwrap_or("").to_string(),
+        );
 
         // Register all existing Zcash wallets with Orchard enabled
         let wallets = self.wallet_repo.list_all().await?;
         for wallet in wallets {
             if wallet.chain == "zcash" {
                 if let Ok(vk) = self.get_viewing_key_for_wallet(&wallet).await {
-                    sync_service.register_wallet(wallet.id, vk).await;
+                    witness_manager.register_wallet(wallet.id, vk).await;
                 }
             }
         }
 
-        let mut orchard_sync = self.orchard_sync.write().await;
-        *orchard_sync = Some(sync_service);
+        // Initialize from saved state or frontier
+        match witness_manager.initialize().await {
+            Ok(height) => {
+                if height > 0 {
+                    tracing::info!("[Orchard Sync] Restored state from height {}", height);
+                } else {
+                    tracing::info!("[Orchard Sync] No saved state, will initialize on first sync");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("[Orchard Sync] Failed to initialize: {}", e);
+            }
+        }
 
-        tracing::info!("Orchard sync service initialized");
+        let mut witness_sync = self.witness_sync.write().await;
+        *witness_sync = Some(witness_manager);
+
+        tracing::info!("Orchard witness sync manager initialized");
         Ok(())
     }
 
@@ -476,10 +488,10 @@ impl WalletService {
         // Sync happens in background task or via explicit /sync endpoint
         self.ensure_orchard_sync_initialized().await?;
 
-        // Get balance from Orchard sync service (cached, fast)
-        let orchard_sync = self.orchard_sync.read().await;
-        if let Some(sync_service) = orchard_sync.as_ref() {
-            let balance = sync_service.get_wallet_balance(wallet_id).await;
+        // Get balance from witness sync manager (fast, from database)
+        let witness_sync = self.witness_sync.read().await;
+        if let Some(manager) = witness_sync.as_ref() {
+            let balance = manager.get_wallet_balance(wallet_id).await;
             return Ok(balance);
         }
 
@@ -509,14 +521,14 @@ impl WalletService {
     async fn ensure_orchard_sync_initialized(&self) -> AppResult<()> {
         // Check if already initialized
         {
-            let orchard_sync = self.orchard_sync.read().await;
-            if orchard_sync.is_some() {
+            let witness_sync = self.witness_sync.read().await;
+            if witness_sync.is_some() {
                 return Ok(());
             }
         }
 
         // Initialize sync service
-        tracing::info!("Auto-initializing Orchard sync service");
+        tracing::info!("Auto-initializing Orchard witness sync manager");
 
         let chain_client = self.chain_registry.get("zcash")?;
         let rpc_url = chain_client.get_rpc_url().await
@@ -533,12 +545,103 @@ impl WalletService {
 
     /// Internal sync method that doesn't re-initialize
     async fn sync_orchard_internal(&self) -> AppResult<ScanProgress> {
-        let orchard_sync = self.orchard_sync.read().await;
+        let witness_sync = self.witness_sync.read().await;
 
-        if let Some(sync_service) = orchard_sync.as_ref() {
-            let progress = sync_service.sync().await
-                .map_err(|e| AppError::BlockchainError(format!("Sync failed: {}", e)))?;
-            Ok(progress)
+        if let Some(manager) = witness_sync.as_ref() {
+            // Get chain height and sync state
+            let chain_tip = manager.get_chain_height().await
+                .map_err(|e| AppError::BlockchainError(format!("Failed to get chain height: {}", e)))?;
+            let mut tree_height = manager.get_tree_height().await;
+
+            // Check if there are notes without witness_state that need rescanning
+            if let Some(rescan_from_height) = manager.check_notes_need_rescan().await
+                .map_err(|e| AppError::BlockchainError(format!("Failed to check notes: {}", e)))? {
+                tracing::warn!(
+                    "[Orchard Sync] Notes without witness_state found. Resetting tree to rescan from block {}",
+                    rescan_from_height
+                );
+
+                // Reset tree and reinitialize from the note's block height
+                manager.reset_for_rescan(rescan_from_height).await
+                    .map_err(|e| AppError::BlockchainError(format!("Failed to reset for rescan: {}", e)))?;
+
+                tree_height = manager.get_tree_height().await;
+            }
+
+            // If tree is not initialized (height=0), initialize from frontier
+            if tree_height == 0 {
+                // Find the earliest note's block_height, or use Orchard activation height
+                let min_height = manager.get_min_scan_height().await
+                    .map_err(|e| AppError::BlockchainError(format!("Failed to get min height: {}", e)))?;
+
+                // Initialize from frontier at height-1 (to include notes in that block)
+                let frontier_height = min_height.saturating_sub(1).max(1_687_104);
+                tracing::info!(
+                    "[Orchard Sync] Initializing tree from frontier at height {}",
+                    frontier_height
+                );
+
+                manager.init_from_frontier(frontier_height).await
+                    .map_err(|e| AppError::BlockchainError(format!("Failed to init from frontier: {}", e)))?;
+
+                tree_height = frontier_height;
+            }
+
+            // If tree is behind, we need to sync
+            if tree_height < chain_tip {
+                tracing::info!(
+                    "[Orchard Sync] Syncing from {} to {}",
+                    tree_height,
+                    chain_tip
+                );
+
+                // Get known positions for existing notes
+                let known_positions = manager.build_known_positions_map().await
+                    .map_err(|e| AppError::BlockchainError(format!("Failed to build positions: {}", e)))?;
+
+                // Fetch blocks in batches and process
+                let mut current = tree_height + 1;
+                let batch_size = 500u64;
+
+                while current <= chain_tip {
+                    let end = std::cmp::min(current + batch_size - 1, chain_tip);
+
+                    // Fetch and process blocks
+                    let blocks = manager.fetch_blocks(current, end).await
+                        .map_err(|e| AppError::BlockchainError(format!("Failed to fetch blocks: {}", e)))?;
+
+                    if !blocks.is_empty() {
+                        let found_notes = manager.process_blocks(blocks, &known_positions).await
+                            .map_err(|e| AppError::BlockchainError(format!("Failed to process blocks: {}", e)))?;
+
+                        // Save any newly found notes
+                        if !found_notes.is_empty() {
+                            tracing::info!(
+                                "[Orchard Sync] Found {} new notes in blocks {}-{}",
+                                found_notes.len(),
+                                current,
+                                end
+                            );
+                            manager.save_notes(&found_notes).await
+                                .map_err(|e| AppError::BlockchainError(format!("Failed to save notes: {}", e)))?;
+                        }
+                    }
+
+                    current = end + 1;
+                }
+
+                // Save state after sync
+                manager.save_state().await
+                    .map_err(|e| AppError::BlockchainError(format!("Failed to save state: {}", e)))?;
+
+                // Update sync state for all wallets
+                let wallet_ids = manager.get_wallet_ids().await;
+                for wallet_id in wallet_ids {
+                    let _ = manager.update_sync_state(wallet_id, chain_tip).await;
+                }
+            }
+
+            Ok(manager.get_progress().await)
         } else {
             Err(AppError::InternalError("Orchard sync not initialized".to_string()))
         }
@@ -599,58 +702,28 @@ impl WalletService {
 
     /// Trigger Orchard sync - scans blockchain for shielded transactions
     pub async fn sync_orchard(&self) -> AppResult<ScanProgress> {
-        let orchard_sync = self.orchard_sync.read().await;
+        // Ensure sync is initialized
+        self.ensure_orchard_sync_initialized().await?;
 
-        if let Some(sync_service) = orchard_sync.as_ref() {
-            tracing::info!("Starting Orchard blockchain sync");
+        tracing::info!("Starting Orchard blockchain sync");
 
-            let progress = sync_service.sync().await
-                .map_err(|e| AppError::BlockchainError(format!("Sync failed: {}", e)))?;
+        let progress = self.sync_orchard_internal().await?;
 
-            tracing::info!(
-                "Orchard sync complete: {} blocks scanned, {} notes found",
-                progress.last_scanned_height,
-                progress.notes_found
-            );
+        tracing::info!(
+            "Orchard sync complete: {} blocks scanned, {} notes found",
+            progress.last_scanned_height,
+            progress.notes_found
+        );
 
-            Ok(progress)
-        } else {
-            // Try to initialize sync service with default RPC
-            tracing::warn!("Orchard sync service not initialized, using default RPC");
-
-            // Get Zcash RPC config from chain registry
-            let chain_client = self.chain_registry.get("zcash")?;
-            let rpc_url = chain_client.get_rpc_url().await
-                .ok_or_else(|| AppError::InternalError("No RPC URL configured for Zcash".to_string()))?;
-            let rpc_auth = chain_client.get_rpc_auth().await;
-
-            drop(orchard_sync); // Release read lock before calling init
-
-            let (rpc_user, rpc_password) = match rpc_auth {
-                Some((u, p)) => (Some(u), Some(p)),
-                None => (None, None),
-            };
-
-            self.init_orchard_sync(&rpc_url, rpc_user.as_deref(), rpc_password.as_deref()).await?;
-
-            // Now try sync again
-            let orchard_sync = self.orchard_sync.read().await;
-            if let Some(sync_service) = orchard_sync.as_ref() {
-                let progress = sync_service.sync().await
-                    .map_err(|e| AppError::BlockchainError(format!("Sync failed: {}", e)))?;
-                Ok(progress)
-            } else {
-                Err(AppError::InternalError("Failed to initialize sync service".to_string()))
-            }
-        }
+        Ok(progress)
     }
 
     /// Get current Orchard scan progress
     pub async fn get_scan_progress(&self) -> AppResult<ScanProgress> {
-        let orchard_sync = self.orchard_sync.read().await;
+        let witness_sync = self.witness_sync.read().await;
 
-        if let Some(sync_service) = orchard_sync.as_ref() {
-            Ok(sync_service.get_progress().await)
+        if let Some(manager) = witness_sync.as_ref() {
+            Ok(manager.get_progress().await)
         } else {
             // Return default progress if not initialized
             let chain_tip = self.chain_registry.get("zcash")
@@ -941,171 +1014,90 @@ impl WalletService {
         // Get current block height for anchor
         let anchor_height = chain_client.get_block_height().await.unwrap_or(2_500_000);
 
-        // Get spendable notes and anchor from the sync service (which has witnesses)
-        let (spendable_notes, tree_anchor) = if proposal.fund_source == FundSource::Shielded
+        // Get spendable notes and anchor from the witness sync manager
+        let (spendable_notes, tree_anchor, _tree_root) = if proposal.fund_source == FundSource::Shielded
             || proposal.fund_source == FundSource::Auto
         {
-            // Helper function to get notes with witnesses and check anchor freshness
-            async fn get_notes_and_check_anchor(
-                sync_service: &crate::blockchain::zcash::orchard::sync::OrchardSyncService,
-                wallet_id: i32,
-                _chain_tip: u64,
-            ) -> (Vec<crate::blockchain::zcash::orchard::scanner::OrchardNote>, [u8; 32], bool) {
-                let notes = sync_service.get_spendable_notes_with_witnesses(wallet_id).await;
-                let notes_with_witnesses: Vec<_> = notes
-                    .into_iter()
-                    .filter(|n| n.witness_data.is_some())
-                    .collect();
+            // Always refresh witnesses to latest chain state before spending
+            // This ensures auth_path and root are computed from the latest tree state
+            {
+                let sync_guard = self.witness_sync.read().await;
+                if let Some(ref manager) = sync_guard.as_ref() {
+                    let tree_height = manager.get_tree_height().await;
+                    let chain_tip = manager.get_chain_height().await.unwrap_or(tree_height);
 
-                if let Some(first_note) = notes_with_witnesses.first() {
-                    if let Some(ref witness) = first_note.witness_data {
-                        let target_root = witness.root;
+                    if tree_height < chain_tip {
+                        tracing::info!(
+                            "[Privacy Transfer] Refreshing witnesses: tree={} -> chain_tip={}",
+                            tree_height,
+                            chain_tip
+                        );
+                        // refresh_witnesses_for_spending updates tree and all witnesses
+                        let _ = manager.refresh_witnesses_for_spending(wallet_id).await;
+                    }
+                }
+            }
 
-                        // Check if anchor is too old by checking tree block height
-                        let tree_height = sync_service.get_tree_block_height().await;
-                        let anchor_too_old = sync_service.is_anchor_too_old(tree_height).await;
+            // Get notes with witnesses
+            let sync_guard = self.witness_sync.read().await;
+            if let Some(manager) = sync_guard.as_ref() {
+                let notes = manager.get_spendable_notes_with_witnesses(wallet_id).await;
 
-                        let matching_notes: Vec<_> = notes_with_witnesses
-                            .into_iter()
-                            .filter(|n| {
-                                if let Some(ref w) = n.witness_data {
-                                    w.root == target_root
-                                } else {
-                                    false
-                                }
-                            })
-                            .collect();
+                // Get anchor directly from the tree
+                let anchor = manager.get_orchard_anchor().await;
+                let tree_root = {
+                    let tree = manager.tree().read().await;
+                    tree.root()
+                };
 
-                        return (matching_notes, target_root, anchor_too_old);
+                tracing::info!(
+                    "[Privacy Transfer] Tree anchor: {}",
+                    hex::encode(&tree_root)
+                );
+
+                // Get MerklePath for each note directly using proper conversion
+                let mut notes_with_paths: Vec<(crate::blockchain::zcash::orchard::scanner::OrchardNote, orchard::tree::MerklePath)> = Vec::new();
+
+                for note in notes {
+                    let nullifier_hex = hex::encode(&note.nullifier);
+                    if let Some(merkle_path) = manager.get_orchard_merkle_path(&nullifier_hex).await {
+                        tracing::debug!(
+                            "[Privacy Transfer] Got MerklePath for note {}: position={}",
+                            &nullifier_hex[..16],
+                            note.position
+                        );
+                        notes_with_paths.push((note, merkle_path));
+                    } else {
+                        tracing::warn!(
+                            "[Privacy Transfer] No MerklePath for note {}",
+                            &nullifier_hex[..16]
+                        );
                     }
                 }
 
-                (notes_with_witnesses, [0u8; 32], true) // Assume too old if no witness
-            }
-
-            // Get the sync service to access notes with witness data
-            // Witness refresh is handled by periodic sync task, no need to refresh here
-            let sync_guard = self.orchard_sync.read().await;
-            if let Some(ref sync_service) = *sync_guard {
-                // Get notes with witnesses (already refreshed by sync task)
-                let (filtered_notes, anchor, _) =
-                    get_notes_and_check_anchor(sync_service, wallet_id, anchor_height).await;
-
                 tracing::info!(
-                    "Loaded {} notes with fresh anchor: {}",
-                    filtered_notes.len(),
-                    hex::encode(&anchor)
+                    "[Privacy Transfer] Loaded {} spendable notes with MerklePaths",
+                    notes_with_paths.len()
                 );
 
-                tracing::info!(
-                    "Loaded {} spendable notes with matching witnesses (anchor={})",
-                    filtered_notes.len(),
-                    hex::encode(&anchor)
-                );
-
-                if filtered_notes.is_empty() && proposal.fund_source == FundSource::Shielded {
+                if notes_with_paths.is_empty() && proposal.fund_source == FundSource::Shielded {
                     tracing::warn!(
                         "No spendable notes with witness data found. \
                          Notes may need to be rescanned to populate witnesses."
                     );
                 }
 
-                (filtered_notes, anchor)
+                (notes_with_paths, anchor, tree_root)
             } else {
-                tracing::warn!("Sync service not initialized, falling back to database");
-                // Fallback to database (without witnesses - shielded spending may fail)
-                let orchard_repo = crate::db::repositories::OrchardRepository::new(self.db_pool.clone());
-                let stored_notes = orchard_repo.get_unspent_notes(wallet_id).await.unwrap_or_default();
-
-                // Convert to OrchardNote format (including spending data)
-                let notes = stored_notes
-                    .into_iter()
-                    .filter_map(|n| {
-                        // Parse nullifier
-                        let mut nullifier = [0u8; 32];
-                        if let Ok(bytes) = hex::decode(&n.nullifier) {
-                            if bytes.len() == 32 {
-                                nullifier.copy_from_slice(&bytes);
-                            }
-                        }
-
-                        // Parse spending data (recipient, rho, rseed)
-                        let mut recipient = [0u8; 43];
-                        let mut rho = [0u8; 32];
-                        let mut rseed = [0u8; 32];
-
-                        let has_spending_data = if let (Some(r), Some(rh), Some(rs)) =
-                            (&n.recipient, &n.rho, &n.rseed)
-                        {
-                            let r_ok = hex::decode(r)
-                                .map(|bytes| {
-                                    if bytes.len() == 43 {
-                                        recipient.copy_from_slice(&bytes);
-                                        true
-                                    } else { false }
-                                })
-                                .unwrap_or(false);
-
-                            let rho_ok = hex::decode(rh)
-                                .map(|bytes| {
-                                    if bytes.len() == 32 {
-                                        rho.copy_from_slice(&bytes);
-                                        true
-                                    } else { false }
-                                })
-                                .unwrap_or(false);
-
-                            let rseed_ok = hex::decode(rs)
-                                .map(|bytes| {
-                                    if bytes.len() == 32 {
-                                        rseed.copy_from_slice(&bytes);
-                                        true
-                                    } else { false }
-                                })
-                                .unwrap_or(false);
-
-                            r_ok && rho_ok && rseed_ok
-                        } else {
-                            false
-                        };
-
-                        // Only include notes with valid spending data for shielded spending
-                        if !has_spending_data {
-                            tracing::warn!(
-                                "Note {} missing spending data, skipping for shielded transfer",
-                                &n.nullifier[..16]
-                            );
-                            return None;
-                        }
-
-                        Some(crate::blockchain::zcash::orchard::scanner::OrchardNote {
-                            id: Some(n.id as i64),
-                            wallet_id: Some(wallet_id),
-                            account_id: 0,
-                            tx_hash: n.tx_hash,
-                            block_height: n.block_height,
-                            note_commitment: [0u8; 32], // Not stored in DB
-                            nullifier,
-                            value_zatoshis: n.value_zatoshis,
-                            position: n.position_in_block as u64,
-                            is_spent: n.is_spent,
-                            memo: n.memo,
-                            merkle_path: None,
-                            recipient,
-                            rho,
-                            rseed,
-                            // No witness data from database - shielded spending may fail
-                            witness_data: None,
-                        })
-                    })
-                    .collect::<Vec<_>>();
-
-                // Empty anchor - transaction building will fail for shielded spending
-                (notes, [0u8; 32])
+                tracing::warn!("Witness sync manager not initialized");
+                (vec![], orchard::tree::Anchor::empty_tree(), [0u8; 32])
             }
         } else {
-            (vec![], [0u8; 32])
+            (vec![], orchard::tree::Anchor::empty_tree(), [0u8; 32])
         };
+
+        // Log for debugging (tree_root is just for logging)
+        let _ = _tree_root;
 
         tracing::info!(
             "execute_privacy_transfer: fund_source={:?}, transparent_inputs={}, spendable_notes={}",
@@ -1115,15 +1107,16 @@ impl WalletService {
         );
 
         // Build the Orchard transaction (includes proof generation and signing)
+        // Now passes notes with their MerklePaths directly, and Anchor as proper type
         let result = transfer_service
             .build_transaction(
                 proposal,
                 &spending_key,
                 &private_key, // Private key for signing transparent inputs
-                spendable_notes,
+                spendable_notes,  // Vec<(OrchardNote, MerklePath)>
                 transparent_inputs,
                 anchor_height,
-                tree_anchor, // Tree anchor from sync service (or empty for shielding-only)
+                tree_anchor,  // orchard::tree::Anchor
             )
             .map_err(|e| AppError::BlockchainError(format!("Failed to build transaction: {}", e)))?;
 
@@ -1264,16 +1257,16 @@ impl WalletService {
 
         tracing::info!("[Wallet Sync] Found {} Zcash wallet(s) to sync", wallet_count);
 
-        // Register all wallets with the sync service
+        // Register all wallets with the witness sync manager
         let mut registered_count = 0usize;
         let mut failed_count = 0usize;
         {
-            let orchard_sync = self.orchard_sync.read().await;
-            if let Some(sync_service) = orchard_sync.as_ref() {
+            let witness_sync = self.witness_sync.read().await;
+            if let Some(manager) = witness_sync.as_ref() {
                 for wallet in &wallets {
                     match self.get_viewing_key_for_wallet(wallet).await {
                         Ok(vk) => {
-                            sync_service.register_wallet(wallet.id, vk).await;
+                            manager.register_wallet(wallet.id, vk).await;
                             registered_count += 1;
                             tracing::debug!(
                                 "[Wallet Sync] Registered wallet {} (address: {})",
@@ -1292,7 +1285,7 @@ impl WalletService {
                     }
                 }
             } else {
-                tracing::error!("[Wallet Sync] Orchard sync service not available!");
+                tracing::error!("[Wallet Sync] Witness sync manager not available!");
             }
         }
 
@@ -1303,7 +1296,7 @@ impl WalletService {
             failed_count
         );
 
-        // Perform sync
+        // Perform sync (this also updates all witnesses)
         tracing::info!("[Wallet Sync] Starting blockchain scan...");
         match self.sync_orchard_internal().await {
             Ok(progress) => {
@@ -1313,10 +1306,6 @@ impl WalletService {
                     progress.last_scanned_height,
                     progress.notes_found
                 );
-
-                // After sync, proactively refresh witnesses for all wallets with notes
-                // This ensures witnesses are always fresh and transfers don't need to wait
-                self.refresh_all_wallet_witnesses(&wallets).await;
             }
             Err(e) => {
                 tracing::warn!("[Wallet Sync] Scan error: {}", e);
@@ -1324,81 +1313,6 @@ impl WalletService {
         }
 
         Ok(wallet_count)
-    }
-
-    /// Proactively refresh witnesses for all wallets that have shielded notes
-    ///
-    /// This is called after each sync cycle to ensure witnesses are always up-to-date,
-    /// so transfers can proceed immediately without waiting for witness refresh.
-    async fn refresh_all_wallet_witnesses(&self, wallets: &[crate::db::models::Wallet]) {
-        let sync_guard = self.orchard_sync.read().await;
-        let Some(sync_service) = sync_guard.as_ref() else {
-            return;
-        };
-
-        // Check if we need to refresh by looking at tree height
-        let tree_height = sync_service.get_tree_block_height().await;
-        if tree_height == 0 {
-            // Tree not initialized yet, skip
-            return;
-        }
-
-        // Check if witnesses are already fresh
-        if !sync_service.is_anchor_too_old(tree_height).await {
-            tracing::debug!(
-                "[Wallet Sync] Witnesses are fresh (tree_height={}), skipping refresh",
-                tree_height
-            );
-            return;
-        }
-
-        tracing::info!(
-            "[Wallet Sync] 🔄 Proactively refreshing witnesses for {} wallet(s)...",
-            wallets.len()
-        );
-
-        let mut refreshed_count = 0;
-        let mut skipped_count = 0;
-
-        for wallet in wallets {
-            // Check if this wallet has any unspent notes
-            let orchard_repo = crate::db::repositories::OrchardRepository::new(self.db_pool.clone());
-            let notes_count = orchard_repo.get_notes_count(wallet.id).await.unwrap_or(0);
-
-            if notes_count == 0 {
-                skipped_count += 1;
-                continue;
-            }
-
-            match sync_service.refresh_witnesses_for_spending(wallet.id).await {
-                Ok(true) => {
-                    refreshed_count += 1;
-                    tracing::info!(
-                        "[Wallet Sync] ✅ Refreshed witnesses for wallet {} ({} notes)",
-                        wallet.id,
-                        notes_count
-                    );
-                }
-                Ok(false) => {
-                    skipped_count += 1;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "[Wallet Sync] Failed to refresh witnesses for wallet {}: {}",
-                        wallet.id,
-                        e
-                    );
-                }
-            }
-        }
-
-        if refreshed_count > 0 {
-            tracing::info!(
-                "[Wallet Sync] 🔄 Witness refresh complete: {} refreshed, {} skipped",
-                refreshed_count,
-                skipped_count
-            );
-        }
     }
 }
 

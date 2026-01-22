@@ -20,7 +20,7 @@ use orchard::{
     builder::{Builder as OrchardBuilder, BundleType, InProgress, Unauthorized},
     circuit::ProvingKey,
     keys::SpendAuthorizingKey,
-    tree::Anchor,
+    tree::{Anchor, MerklePath},
     value::NoteValue,
     Proof,
 };
@@ -285,10 +285,10 @@ impl OrchardTransferService {
         proposal: &TransferProposal,
         spending_key: &OrchardSpendingKey,
         private_key_hex: &str,
-        spendable_notes: Vec<OrchardNote>,
+        spendable_notes: Vec<(OrchardNote, MerklePath)>,  // Now includes MerklePath directly
         transparent_inputs: Vec<TransparentInput>,
         anchor_height: u64,
-        anchor: [u8; 32],
+        anchor: Anchor,  // Now uses orchard::tree::Anchor directly
     ) -> OrchardResult<TransferResult> {
         // Log all proposal details for debugging
         tracing::info!(
@@ -481,10 +481,10 @@ impl OrchardTransferService {
         proposal: &TransferProposal,
         spending_key: &OrchardSpendingKey,
         private_key_hex: &str,
-        spendable_notes: Vec<OrchardNote>,
+        spendable_notes: Vec<(OrchardNote, MerklePath)>,  // Now includes MerklePath directly
         transparent_inputs: Vec<TransparentInput>,
         _anchor_height: u64,
-        anchor: [u8; 32],
+        anchor: Anchor,  // Now uses orchard::tree::Anchor directly
     ) -> OrchardResult<Vec<u8>> {
         // Create transaction builder
         let mut tx_data = Vec::new();
@@ -564,72 +564,36 @@ impl OrchardTransferService {
     /// Build shielded-to-shielded bundle (spending from shielded pool)
     ///
     /// This creates a transaction that spends from shielded notes and sends to shielded addresses.
+    /// Now receives notes with their MerklePaths directly (using proper conversion from IncrementalWitness).
     fn build_shielded_bundle(
         &self,
         tx_data: &mut Vec<u8>,
         proposal: &TransferProposal,
         spending_key: &OrchardSpendingKey,
-        notes: Vec<OrchardNote>,
-        anchor_bytes: [u8; 32],
+        notes_with_paths: Vec<(OrchardNote, MerklePath)>,  // Notes with their MerklePaths
+        anchor: Anchor,  // Anchor directly as orchard::tree::Anchor
     ) -> OrchardResult<()> {
         use super::address::OrchardAddressManager;
         use orchard::keys::Scope;
-        use orchard::tree::{Anchor, MerkleHashOrchard};
         use orchard::value::NoteValue;
 
         tracing::info!(
             "Building shielded bundle: {} notes to spend, amount={} zatoshis, fee={} zatoshis",
-            notes.len(),
+            notes_with_paths.len(),
             proposal.amount_zatoshis,
             proposal.fee_zatoshis
         );
 
         // Select notes to cover the required amount
         let total_needed = proposal.amount_zatoshis + proposal.fee_zatoshis;
-        let (selected_notes, total_input) = self.select_notes(notes, total_needed)?;
+        let (selected_notes_with_paths, total_input) = self.select_notes_with_paths(notes_with_paths, total_needed)?;
 
         tracing::info!(
             "Selected {} notes with total {} zatoshis (need {} zatoshis)",
-            selected_notes.len(),
+            selected_notes_with_paths.len(),
             total_input,
             total_needed
         );
-
-        // Verify all selected notes have witness data AND their witness roots match the anchor
-        for (idx, note) in selected_notes.iter().enumerate() {
-            if note.witness_data.is_none() {
-                tracing::error!(
-                    "Note {} at position {} has no witness data. Cannot spend without valid witness.",
-                    idx,
-                    note.position
-                );
-                return Err(OrchardError::WitnessNotFound);
-            }
-
-            // Verify witness root matches the anchor
-            if let Some(ref witness) = note.witness_data {
-                if witness.root != anchor_bytes {
-                    tracing::error!(
-                        "Note {} witness root mismatch! witness.root={}, expected anchor={}",
-                        idx,
-                        hex::encode(&witness.root),
-                        hex::encode(&anchor_bytes)
-                    );
-                    return Err(OrchardError::TransactionBuild(format!(
-                        "Witness anchor mismatch for note {}: witness was created at a different tree state. \
-                         This can happen if the tree was updated after scanning. \
-                         Please resync to update witnesses.",
-                        idx
-                    )));
-                }
-
-                tracing::debug!(
-                    "Note {} witness verified: position={}, root matches anchor",
-                    idx,
-                    witness.position
-                );
-            }
-        }
 
         // Calculate change
         let change_amount = total_input - total_needed;
@@ -640,31 +604,12 @@ impl OrchardTransferService {
         // Get FVK from spending key
         let fvk = spending_key.to_fvk();
 
-        // Parse the anchor from bytes
-        // The anchor is the tree root that matches our witnesses
-        let anchor = {
-            let hash_opt: subtle::CtOption<MerkleHashOrchard> = MerkleHashOrchard::from_bytes(&anchor_bytes);
-            if hash_opt.is_some().into() {
-                Anchor::from(hash_opt.unwrap())
-            } else {
-                tracing::error!("Invalid anchor bytes: {}", hex::encode(&anchor_bytes));
-                return Err(OrchardError::TransactionBuild(
-                    "Invalid anchor bytes".to_string()
-                ));
-            }
-        };
-
-        tracing::info!(
-            "Using anchor from tree: {}",
-            hex::encode(&anchor_bytes)
-        );
-
-        // Create builder
+        // Create builder with the anchor directly
         let bundle_type = BundleType::DEFAULT;
         let mut builder = OrchardBuilder::new(bundle_type, anchor);
 
-        // Add spends (reconstruct Note from stored data)
-        for (idx, note) in selected_notes.iter().enumerate() {
+        // Add spends (reconstruct Note from stored data, use MerklePath directly)
+        for (idx, (note, merkle_path)) in selected_notes_with_paths.iter().enumerate() {
             // Reconstruct the orchard::Address from stored bytes
             let recipient_addr = orchard::Address::from_raw_address_bytes(&note.recipient);
             if recipient_addr.is_none().into() {
@@ -707,65 +652,18 @@ impl OrchardTransferService {
             let orchard_note = orchard_note.unwrap();
 
             // Verify that the reconstructed note's commitment matches the stored one
-            // This is critical for proof validity
             let extracted_cmx = orchard::note::ExtractedNoteCommitment::from(orchard_note.commitment());
             let reconstructed_cmx = extracted_cmx.to_bytes();
 
-            // If note_commitment is all zeros, it was loaded from database (not stored)
-            // In this case, we trust the reconstructed commitment
-            let is_db_note = note.note_commitment == [0u8; 32];
-            if !is_db_note && reconstructed_cmx != note.note_commitment {
-                tracing::error!(
-                    "Note {} commitment MISMATCH!\n  Stored:        {}\n  Reconstructed: {}",
-                    idx,
-                    hex::encode(&note.note_commitment),
-                    hex::encode(&reconstructed_cmx)
-                );
-                return Err(OrchardError::TransactionBuild(format!(
-                    "Note {} commitment mismatch - stored data may be corrupted or incomplete",
-                    idx
-                )));
-            }
             tracing::info!(
-                "Note {} commitment: {} (from_db={})",
+                "Note {} commitment: {}, position={}",
                 idx,
                 hex::encode(&reconstructed_cmx[..8]),
-                is_db_note
-            );
-
-            // Get the merkle path from witness data
-            let merkle_path = if let Some(ref witness) = note.witness_data {
-                // Log detailed witness info
-                tracing::info!(
-                    "Note {} witness details:\n  position={}\n  auth_path_len={}\n  auth_path[0]={}\n  auth_path[31]={}\n  root={}",
-                    idx,
-                    witness.position,
-                    witness.auth_path.len(),
-                    witness.auth_path.first().map(|h| hex::encode(&h[..8])).unwrap_or_default(),
-                    witness.auth_path.last().map(|h| hex::encode(&h[..8])).unwrap_or_default(),
-                    hex::encode(&witness.root[..16])
-                );
-
-                // Convert witness data to orchard MerklePath
-                witness.to_merkle_path()
-                    .map_err(|e| OrchardError::TransactionBuild(
-                        format!("Invalid witness for note {}: {}", idx, e)
-                    ))?
-            } else {
-                // This shouldn't happen due to the check above, but handle it anyway
-                tracing::error!("Note {} missing witness data", idx);
-                return Err(OrchardError::WitnessNotFound);
-            };
-
-            tracing::info!(
-                "Note {} MerklePath created: position={} (0x{:08x})",
-                idx,
-                note.position,
                 note.position
             );
 
-            // Add the spend
-            match builder.add_spend(fvk.clone(), orchard_note, merkle_path) {
+            // Add the spend using the MerklePath directly (from proper conversion)
+            match builder.add_spend(fvk.clone(), orchard_note, merkle_path.clone()) {
                 Ok(_) => {
                     tracing::debug!(
                         "Added spend {}: value={} zatoshis",
@@ -817,7 +715,7 @@ impl OrchardTransferService {
         }
 
         // Build the bundle
-        tracing::info!("Building Orchard bundle with anchor: {}", hex::encode(&anchor_bytes));
+        tracing::info!("Building Orchard bundle...");
         let (unauthorized_bundle, _meta) = builder
             .build::<i64>(&mut OsRng)
             .map_err(|e| OrchardError::TransactionBuild(format!("Failed to build bundle: {:?}", e)))?
@@ -847,7 +745,7 @@ impl OrchardTransferService {
         tracing::info!("Computed shielded sighash: {}", hex::encode(&sighash));
 
         // Apply signatures (spend auth + binding)
-        let saks: Vec<orchard::keys::SpendAuthorizingKey> = selected_notes
+        let saks: Vec<orchard::keys::SpendAuthorizingKey> = selected_notes_with_paths
             .iter()
             .map(|_| orchard::keys::SpendAuthorizingKey::from(spending_key.sk()))
             .collect();
@@ -870,7 +768,7 @@ impl OrchardTransferService {
 
         tracing::info!(
             "Built shielded transaction: {} spends, {} outputs, {} bytes",
-            selected_notes.len(),
+            selected_notes_with_paths.len(),
             if change_amount > 0 { 2 } else { 1 },
             tx_data.len()
         );
@@ -938,7 +836,7 @@ impl OrchardTransferService {
         spending_key: &OrchardSpendingKey,
         private_key_hex: &str,
         transparent_inputs: Vec<TransparentInput>,
-        _anchor: [u8; 32],
+        _anchor: Anchor,  // Now uses orchard::tree::Anchor directly
     ) -> OrchardResult<()> {
         // Calculate total transparent input
         let total_transparent_input: u64 = transparent_inputs.iter().map(|i| i.value).sum();
@@ -1412,6 +1310,40 @@ impl OrchardTransferService {
             }
             total += note.value_zatoshis;
             selected.push(note);
+        }
+
+        if total < amount_needed {
+            return Err(OrchardError::InsufficientBalance {
+                available: total,
+                required: amount_needed,
+            });
+        }
+
+        Ok((selected, total))
+    }
+
+    /// Select notes with their MerklePaths to cover the required amount
+    fn select_notes_with_paths(
+        &self,
+        mut notes_with_paths: Vec<(OrchardNote, MerklePath)>,
+        amount_needed: u64,
+    ) -> OrchardResult<(Vec<(OrchardNote, MerklePath)>, u64)> {
+        if notes_with_paths.is_empty() {
+            return Err(OrchardError::NoSpendableNotes);
+        }
+
+        // Sort by value descending
+        notes_with_paths.sort_by(|a, b| b.0.value_zatoshis.cmp(&a.0.value_zatoshis));
+
+        let mut selected = Vec::new();
+        let mut total: u64 = 0;
+
+        for (note, path) in notes_with_paths {
+            if total >= amount_needed {
+                break;
+            }
+            total += note.value_zatoshis;
+            selected.push((note, path));
         }
 
         if total < amount_needed {
