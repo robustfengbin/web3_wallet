@@ -1097,23 +1097,43 @@ impl OrchardSyncService {
 
             let blocks_behind = chain_tip.saturating_sub(min_witness_height);
 
-            if blocks_behind >= Self::WITNESS_SYNC_THRESHOLD {
+            // Check if any wallet has notes missing witness data
+            let keys = self.wallet_keys.read().await;
+            let wallet_ids: Vec<i32> = keys.keys().copied().collect();
+            drop(keys);
+
+            let mut has_missing_witnesses = false;
+            for wallet_id in &wallet_ids {
+                if repo.has_notes_missing_witness(*wallet_id).await.unwrap_or(false) {
+                    has_missing_witnesses = true;
+                    tracing::info!(
+                        "[Orchard Sync] Wallet {} has notes missing witness data",
+                        wallet_id
+                    );
+                    break;
+                }
+            }
+
+            // Trigger refresh if either: threshold exceeded OR notes missing witness
+            if blocks_behind >= Self::WITNESS_SYNC_THRESHOLD || has_missing_witnesses {
+                let reason = if has_missing_witnesses {
+                    "notes missing witness data".to_string()
+                } else {
+                    format!("{} blocks behind (threshold={})", blocks_behind, Self::WITNESS_SYNC_THRESHOLD)
+                };
+
                 tracing::info!(
-                    "[Orchard Sync] 🔄 Witness refresh triggered: chain_tip={}, last_witness_height={}, behind={} blocks (threshold={})",
+                    "[Orchard Sync] 🔄 Witness refresh triggered: {} (chain_tip={}, last_witness_height={})",
+                    reason,
                     chain_tip,
-                    min_witness_height,
-                    blocks_behind,
-                    Self::WITNESS_SYNC_THRESHOLD
+                    min_witness_height
                 );
 
                 // Refresh witnesses for all wallets with unspent notes
                 // This rescans the chain to compute fresh witnesses with valid anchors
-                let keys = self.wallet_keys.read().await;
-                let wallet_ids: Vec<i32> = keys.keys().copied().collect();
-                drop(keys);
-
                 let mut refreshed_count = 0;
-                for wallet_id in wallet_ids {
+                for wallet_id in &wallet_ids {
+                    let wallet_id = *wallet_id;
                     // Check if wallet has unspent notes
                     let has_notes = repo.get_notes_count(wallet_id).await.unwrap_or(0) > 0;
                     if !has_notes {

@@ -387,4 +387,21 @@ impl OrchardRepository {
         .await?;
         Ok(result.map(|(c,)| c as u32).unwrap_or(0))
     }
+
+    /// Check if wallet has unspent notes missing witness data
+    /// Returns true if there are notes that need witness refresh
+    pub async fn has_notes_missing_witness(&self, wallet_id: i32) -> AppResult<bool> {
+        let result: Option<(i64,)> = sqlx::query_as(
+            r#"
+            SELECT COUNT(*) FROM orchard_notes
+            WHERE wallet_id = ?
+              AND is_spent = FALSE
+              AND (witness_position IS NULL OR witness_auth_path IS NULL OR witness_root IS NULL)
+            "#
+        )
+        .bind(wallet_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(result.map(|(c,)| c > 0).unwrap_or(false))
+    }
 }
