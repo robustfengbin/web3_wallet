@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Shield, Send, AlertTriangle, CheckCircle, ArrowRight, Info, Lock } from 'lucide-react';
+import { Shield, Send, AlertTriangle, CheckCircle, ArrowRight, Info, Lock, Fuel, Calculator, X } from 'lucide-react';
 import { Card } from '../../../components/Common/Card';
 import { LoadingSpinner } from '../../../components/Common/LoadingSpinner';
 import { BalanceBreakdown } from './components/BalanceBreakdown';
@@ -14,8 +14,9 @@ import type {
   OrchardTransferRequest,
   FundSource,
   ExecuteTransferRequest,
+  OrchardTransferProposal,
 } from '../../../types/orchard';
-import { isUnifiedAddress, zecToZatoshis } from '../../../types/orchard';
+import { isUnifiedAddress, zecToZatoshis, zatoshisToZec } from '../../../types/orchard';
 import type { Wallet } from '../../../types';
 
 export function PrivacyTransfer() {
@@ -33,6 +34,9 @@ export function PrivacyTransfer() {
   const [amount, setAmount] = useState('');
   const [memo, setMemo] = useState('');
   const [fundSource, setFundSource] = useState<FundSource>('auto');
+
+  // Transfer proposal state (for confirmation step)
+  const [pendingProposal, setPendingProposal] = useState<OrchardTransferProposal | null>(null);
 
   // UI state
   const [loading, setLoading] = useState(true);
@@ -189,8 +193,8 @@ export function PrivacyTransfer() {
     return null;
   };
 
-  // Handle submit
-  const handleSubmit = async (e: React.FormEvent) => {
+  // Handle initiate (step 1: create proposal and show confirmation)
+  const handleInitiate = async (e: React.FormEvent) => {
     e.preventDefault();
 
     const validationError = validateForm();
@@ -216,41 +220,75 @@ export function PrivacyTransfer() {
         fund_source: fundSource,
       };
 
-      // Initiate transfer (creates proposal)
+      // Initiate transfer (creates proposal with fee estimate)
       const proposal = await orchardApi.initiateOrchardTransfer(request);
+      setPendingProposal(proposal);
+    } catch (err: any) {
+      setError(err.response?.data?.error || err.message || 'Failed to create transfer proposal');
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
+  // Handle execute (step 2: confirm and execute)
+  const handleExecute = async () => {
+    if (!pendingProposal || !selectedWalletId) return;
+
+    setSubmitting(true);
+    setError(null);
+
+    try {
       // Execute transfer with full proposal data
       const executeResponse = await orchardApi.executeOrchardTransfer(
-        proposal.proposal_id,
+        pendingProposal.proposal_id,
         {
           wallet_id: selectedWalletId,
-          proposal_id: proposal.proposal_id,
-          amount_zatoshis: proposal.amount_zatoshis,
-          fee_zatoshis: proposal.fee_zatoshis,
-          to_address: proposal.to_address,
-          memo: proposal.memo,
-          fund_source: proposal.fund_source,
-          is_shielding: proposal.is_shielding,
-          expiry_height: proposal.expiry_height,
+          proposal_id: pendingProposal.proposal_id,
+          amount_zatoshis: pendingProposal.amount_zatoshis,
+          fee_zatoshis: pendingProposal.fee_zatoshis,
+          to_address: pendingProposal.to_address,
+          memo: pendingProposal.memo,
+          fund_source: pendingProposal.fund_source,
+          is_shielding: pendingProposal.is_shielding,
+          expiry_height: pendingProposal.expiry_height,
         }
       );
 
       setTxHash(executeResponse.tx_id);
       setSuccess(t('zcash.orchard.transferSuccess', 'Shielded transfer submitted successfully!'));
 
-      // Clear form
-      setToAddress('');
-      setAmount('');
-      setMemo('');
+      // Clear form and proposal
+      resetForm();
 
       // Reload balance
       const combinedBalance = await orchardApi.getCombinedBalance(selectedWalletId);
       setBalance(combinedBalance);
     } catch (err: any) {
-      setError(err.response?.data?.error || err.message || 'Transfer failed');
+      setError(err.response?.data?.error || err.message || 'Transfer execution failed');
     } finally {
       setSubmitting(false);
     }
+  };
+
+  // Reset form and proposal
+  const resetForm = () => {
+    setToAddress('');
+    setAmount('');
+    setMemo('');
+    setPendingProposal(null);
+  };
+
+  // Cancel pending proposal
+  const handleCancel = () => {
+    setPendingProposal(null);
+    setError(null);
+  };
+
+  // Calculate balance after transfer
+  const getBalanceAfterTransfer = (): number => {
+    if (!pendingProposal) return getAvailableBalance();
+    const totalCost = zatoshisToZec(pendingProposal.amount_zatoshis + pendingProposal.fee_zatoshis);
+    return Math.max(0, getAvailableBalance() - totalCost);
   };
 
   if (loading) {
@@ -359,15 +397,17 @@ export function PrivacyTransfer() {
         <ScanProgress progress={scanProgress} onSync={handleSync} />
       )}
 
-      {/* Transfer Form */}
+      {/* Transfer Form and Confirmation - Two Column Layout */}
       {isOrchardEnabled && (
-        <Card>
-          <h3 className="text-lg font-medium text-gray-900 mb-4 flex items-center gap-2">
-            <Send className="w-5 h-5 text-yellow-600" />
-            {t('zcash.orchard.sendPrivate', 'Send Private Transfer')}
-          </h3>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Left Column: Transfer Form */}
+          <Card>
+            <h3 className="text-lg font-medium text-gray-900 mb-4 flex items-center gap-2">
+              <Send className="w-5 h-5 text-yellow-600" />
+              {t('zcash.orchard.sendPrivate', 'Send Private Transfer')}
+            </h3>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
+            <form onSubmit={handleInitiate} className="space-y-4">
             {/* Fund Source Selection */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -494,7 +534,7 @@ export function PrivacyTransfer() {
             </div>
 
             {/* Error Message */}
-            {error && (
+            {error && !pendingProposal && (
               <div className="flex items-start gap-3 p-4 bg-red-50 rounded-lg border border-red-200">
                 <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
                 <p className="text-sm text-red-700">{error}</p>
@@ -516,27 +556,180 @@ export function PrivacyTransfer() {
               </div>
             )}
 
-            {/* Submit Button */}
+            {/* Initiate Button */}
             <button
               type="submit"
-              disabled={submitting || !toAddress || !amount}
+              disabled={submitting || !toAddress || !amount || pendingProposal !== null}
               className="w-full py-4 bg-yellow-500 text-white rounded-lg font-medium hover:bg-yellow-600 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 text-lg"
             >
-              {submitting ? (
+              {submitting && !pendingProposal ? (
                 <>
                   <LoadingSpinner />
-                  {t('zcash.orchard.sending', 'Sending...')}
+                  {t('zcash.orchard.preparing', 'Preparing...')}
                 </>
               ) : (
                 <>
                   <Shield className="w-5 h-5" />
-                  {t('zcash.orchard.sendPrivateButton', 'Send Private Transfer')}
+                  {t('zcash.orchard.prepareTransfer', 'Prepare Transfer')}
                   <ArrowRight className="w-5 h-5" />
                 </>
               )}
             </button>
           </form>
         </Card>
+
+          {/* Right Column: Confirmation Panel */}
+          <Card>
+            <h3 className="text-lg font-medium text-gray-900 mb-4 flex items-center gap-2">
+              <Calculator className="w-5 h-5 text-yellow-600" />
+              {t('zcash.orchard.confirmation', 'Transfer Confirmation')}
+            </h3>
+
+            {pendingProposal ? (
+              <div className="space-y-4">
+                {/* Review Notice */}
+                <div className="p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                  <p className="text-yellow-800 font-medium">
+                    {t('zcash.orchard.reviewAndConfirm', 'Please review and confirm your transfer')}
+                  </p>
+                </div>
+
+                {/* Transfer Details */}
+                <div className="space-y-3">
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">{t('zcash.orchard.recipient', 'Recipient')}:</span>
+                    <span className="font-mono text-sm text-right max-w-[200px] truncate">
+                      {pendingProposal.to_address.slice(0, 12)}...{pendingProposal.to_address.slice(-8)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-500">{t('zcash.orchard.amount', 'Amount')}:</span>
+                    <span className="font-semibold text-lg">
+                      {zatoshisToZec(pendingProposal.amount_zatoshis).toFixed(8)} ZEC
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-gray-500">{t('zcash.orchard.source', 'Fund Source')}:</span>
+                    <span className={`px-2 py-1 text-xs rounded-full ${
+                      pendingProposal.fund_source === 'shielded'
+                        ? 'bg-green-100 text-green-800'
+                        : pendingProposal.fund_source === 'transparent'
+                        ? 'bg-blue-100 text-blue-800'
+                        : 'bg-gray-100 text-gray-800'
+                    }`}>
+                      {pendingProposal.fund_source === 'shielded' ? 'Shielded' :
+                       pendingProposal.fund_source === 'transparent' ? 'Transparent' : 'Auto'}
+                    </span>
+                  </div>
+                  {pendingProposal.is_shielding && (
+                    <div className="flex items-center gap-2 text-sm text-blue-600">
+                      <Lock className="w-4 h-4" />
+                      {t('zcash.orchard.shieldingOperation', 'Shielding operation (T → Z)')}
+                    </div>
+                  )}
+                </div>
+
+                {/* Fee Details */}
+                <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg space-y-3">
+                  <div className="flex items-center text-blue-800 font-medium">
+                    <Fuel className="w-4 h-4 mr-2" />
+                    {t('zcash.orchard.feeDetails', 'Fee Details')}
+                  </div>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">{t('zcash.orchard.networkFee', 'Network Fee')}:</span>
+                      <span className="font-semibold text-orange-600">
+                        {zatoshisToZec(pendingProposal.fee_zatoshis).toFixed(8)} ZEC
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">{t('zcash.orchard.expiryHeight', 'Expiry Height')}:</span>
+                      <span className="font-mono text-xs">
+                        {pendingProposal.expiry_height.toLocaleString()}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Balance Summary */}
+                <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg space-y-3">
+                  <div className="flex items-center text-gray-800 font-medium">
+                    <Calculator className="w-4 h-4 mr-2" />
+                    {t('zcash.orchard.balanceSummary', 'Balance Summary')}
+                  </div>
+                  <div className="space-y-2 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">{t('zcash.orchard.recipientReceives', 'Recipient Receives')}:</span>
+                      <span className="font-semibold text-green-600">
+                        +{zatoshisToZec(pendingProposal.amount_zatoshis).toFixed(8)} ZEC
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-600">{t('zcash.orchard.yourBalanceAfter', 'Your Balance After')}:</span>
+                      <span className="font-mono">
+                        {getBalanceAfterTransfer().toFixed(8)} ZEC
+                      </span>
+                    </div>
+                    <div className="border-t border-gray-200 my-2"></div>
+                    <div className="flex justify-between">
+                      <span className="text-gray-700 font-medium">{t('zcash.orchard.totalCost', 'Total Cost')}:</span>
+                      <span className="font-semibold text-red-600">
+                        -{zatoshisToZec(pendingProposal.amount_zatoshis + pendingProposal.fee_zatoshis).toFixed(8)} ZEC
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Error Message in Confirmation */}
+                {error && (
+                  <div className="flex items-start gap-3 p-4 bg-red-50 rounded-lg border border-red-200">
+                    <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+                    <p className="text-sm text-red-700">{error}</p>
+                  </div>
+                )}
+
+                {/* Action Buttons */}
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={handleCancel}
+                    disabled={submitting}
+                    className="flex-1 px-4 py-3 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    <X className="w-4 h-4" />
+                    {t('common.cancel', 'Cancel')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleExecute}
+                    disabled={submitting}
+                    className="flex-1 px-4 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    {submitting ? (
+                      <>
+                        <LoadingSpinner />
+                        {t('zcash.orchard.sending', 'Sending...')}
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-4 h-4" />
+                        {t('zcash.orchard.confirmSend', 'Confirm & Send')}
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="text-center py-12 text-gray-500">
+                <Shield className="w-12 h-12 mx-auto mb-4 text-gray-300" />
+                <p>{t('zcash.orchard.noPending', 'No pending transfer')}</p>
+                <p className="text-sm mt-2">
+                  {t('zcash.orchard.fillFormPrompt', 'Fill in the transfer form to see confirmation details')}
+                </p>
+              </div>
+            )}
+          </Card>
+        </div>
       )}
 
       {/* Bottom spacing */}
