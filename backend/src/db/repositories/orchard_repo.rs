@@ -400,10 +400,10 @@ impl OrchardRepository {
         Ok(result.is_some())
     }
 
-    /// Get notes count for a wallet
+    /// Get unspent notes count for a wallet
     pub async fn get_notes_count(&self, wallet_id: i32) -> AppResult<u32> {
         let result: Option<(i64,)> = sqlx::query_as(
-            "SELECT COUNT(*) FROM orchard_notes WHERE wallet_id = ?"
+            "SELECT COUNT(*) FROM orchard_notes WHERE wallet_id = ? AND is_spent = FALSE"
         )
         .bind(wallet_id)
         .fetch_optional(&self.pool)
