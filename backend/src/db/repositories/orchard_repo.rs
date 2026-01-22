@@ -182,7 +182,10 @@ impl OrchardRepository {
         Ok(result.last_insert_id() as i32)
     }
 
-    /// Save a newly discovered note with full spending data
+    /// Save a newly discovered note with full spending data and witness position
+    ///
+    /// The witness_position is the global position in the Orchard commitment tree,
+    /// saved at discovery time to enable fast witness refresh without re-scanning.
     pub async fn save_note_full(
         &self,
         wallet_id: i32,
@@ -195,16 +198,18 @@ impl OrchardRepository {
         recipient: &str,
         rho: &str,
         rseed: &str,
+        witness_position: u64,  // Global tree position, saved at discovery
     ) -> AppResult<i32> {
         let result = sqlx::query(
             r#"
             INSERT INTO orchard_notes
-                (wallet_id, nullifier, value_zatoshis, block_height, tx_hash, position_in_block, memo, recipient, rho, rseed)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (wallet_id, nullifier, value_zatoshis, block_height, tx_hash, position_in_block, memo, recipient, rho, rseed, witness_position)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
                 recipient = VALUES(recipient),
                 rho = VALUES(rho),
-                rseed = VALUES(rseed)
+                rseed = VALUES(rseed),
+                witness_position = VALUES(witness_position)
             "#
         )
         .bind(wallet_id)
@@ -217,6 +222,7 @@ impl OrchardRepository {
         .bind(recipient)
         .bind(rho)
         .bind(rseed)
+        .bind(witness_position)
         .execute(&self.pool)
         .await?;
         Ok(result.last_insert_id() as i32)

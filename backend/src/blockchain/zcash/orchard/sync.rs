@@ -976,13 +976,15 @@ impl OrchardSyncService {
                     .or_insert_with(Vec::new)
                     .push(note.clone());
 
-                // Persist to database with full spending data
+                // Persist to database with full spending data and witness position
                 if let Some(repo) = &self.db_repo {
                     let nullifier_hex = hex::encode(note.nullifier);
                     let recipient_hex = hex::encode(note.recipient);
                     let rho_hex = hex::encode(note.rho);
                     let rseed_hex = hex::encode(note.rseed);
 
+                    // Save the global tree position for fast witness refresh
+                    // This avoids re-scanning when refreshing witnesses later
                     match repo.save_note_full(
                         wallet_id,
                         &nullifier_hex,
@@ -994,13 +996,15 @@ impl OrchardSyncService {
                         &recipient_hex,
                         &rho_hex,
                         &rseed_hex,
+                        note.position,  // witness_position = global tree position
                     ).await {
                         Ok(_) => {
                             tracing::debug!(
-                                "[Orchard Sync] Persisted note to database: wallet={}, value={}, nullifier={}..., with spending data",
+                                "[Orchard Sync] Persisted note to database: wallet={}, value={}, nullifier={}..., position={}, with spending data",
                                 wallet_id,
                                 note.value_zatoshis,
-                                &nullifier_hex[..16]
+                                &nullifier_hex[..16],
+                                note.position
                             );
                         }
                         Err(e) => {
