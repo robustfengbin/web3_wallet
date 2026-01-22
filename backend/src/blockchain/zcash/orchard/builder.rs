@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 /// Parameters for an Orchard (shielded) transfer
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchardTransferParams {
-    /// Source account ID
-    pub account_id: u32,
+    /// Wallet ID (primary identifier for notes)
+    pub wallet_id: i32,
 
     /// Recipient address (unified or shielded)
     pub to_address: String,

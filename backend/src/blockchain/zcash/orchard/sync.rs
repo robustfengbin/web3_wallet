@@ -1216,52 +1216,35 @@ impl OrchardSyncService {
             }
         }
 
-        // Fallback to in-memory scanner
+        // Fallback to in-memory scanner (now uses wallet_id directly)
         let scanner = self.scanner.read().await;
-        let keys = self.wallet_keys.read().await;
+        let chain_height = self.get_chain_height().await.unwrap_or(0);
 
-        if let Some(vk) = keys.get(&wallet_id) {
-            let account_id = vk.account_index;
-            let chain_height = self.get_chain_height().await.unwrap_or(0);
+        let total = scanner.get_balance(wallet_id);
+        let spendable = scanner.get_spendable_balance(wallet_id, chain_height);
+        let unspent_notes = scanner.get_unspent_notes(wallet_id);
 
-            let total = scanner.get_balance(account_id);
-            let spendable = scanner.get_spendable_balance(account_id, chain_height);
-            let unspent_notes = scanner.get_unspent_notes(account_id);
-
-            ShieldedBalance::new(
-                ShieldedPool::Orchard,
-                total,
-                spendable,
-                unspent_notes.len() as u32,
-            )
-        } else {
-            ShieldedBalance::new(ShieldedPool::Orchard, 0, 0, 0)
-        }
+        ShieldedBalance::new(
+            ShieldedPool::Orchard,
+            total,
+            spendable,
+            unspent_notes.len() as u32,
+        )
     }
 
     /// Get unspent notes for a wallet
     pub async fn get_unspent_notes(&self, wallet_id: i32) -> Vec<OrchardNote> {
         let scanner = self.scanner.read().await;
-        let keys = self.wallet_keys.read().await;
-
-        if let Some(vk) = keys.get(&wallet_id) {
-            scanner.get_unspent_notes(vk.account_index)
-        } else {
-            vec![]
-        }
+        // Now uses wallet_id directly - no filtering needed
+        scanner.get_unspent_notes(wallet_id)
     }
 
     /// Get spendable notes for a wallet
     pub async fn get_spendable_notes(&self, wallet_id: i32) -> Vec<OrchardNote> {
         let scanner = self.scanner.read().await;
-        let keys = self.wallet_keys.read().await;
-
-        if let Some(vk) = keys.get(&wallet_id) {
-            let chain_height = self.get_chain_height().await.unwrap_or(0);
-            scanner.get_spendable_notes(vk.account_index, chain_height)
-        } else {
-            vec![]
-        }
+        let chain_height = self.get_chain_height().await.unwrap_or(0);
+        // Now uses wallet_id directly - no filtering needed
+        scanner.get_spendable_notes(wallet_id, chain_height)
     }
 
     /// Get current scan progress
@@ -1314,34 +1297,34 @@ impl OrchardSyncService {
     /// If notes/witnesses are not in memory (e.g., after restart), loads from database.
     pub async fn get_spendable_notes_with_witnesses(&self, wallet_id: i32) -> Vec<OrchardNote> {
         let scanner = self.scanner.read().await;
-        let keys = self.wallet_keys.read().await;
+        let chain_height = self.get_chain_height().await.unwrap_or(0);
 
-        if let Some(vk) = keys.get(&wallet_id) {
-            let chain_height = self.get_chain_height().await.unwrap_or(0);
-            let memory_notes = scanner.get_spendable_notes(vk.account_index, chain_height);
+        // Now uses wallet_id directly - notes are properly isolated by wallet_id in scanner
+        let memory_notes = scanner.get_spendable_notes(wallet_id, chain_height);
 
-            // Check how many have witness data in memory
-            let notes_with_memory_witness = memory_notes.iter().filter(|n| n.witness_data.is_some()).count();
+        // Check how many have witness data in memory
+        let notes_with_memory_witness = memory_notes.iter().filter(|n| n.witness_data.is_some()).count();
 
+        tracing::info!(
+            "[Orchard Sync] get_spendable_notes_with_witnesses: wallet={}, memory_notes={}, with_witness={}",
+            wallet_id,
+            memory_notes.len(),
+            notes_with_memory_witness
+        );
+
+        // If we have notes with witnesses in memory, use them
+        // No need to filter by wallet_id anymore - notes are now stored by wallet_id in scanner
+        if notes_with_memory_witness > 0 {
+            let result: Vec<_> = memory_notes.into_iter()
+                .filter(|n| n.witness_data.is_some())
+                .collect();
             tracing::info!(
-                "[Orchard Sync] get_spendable_notes_with_witnesses: wallet={}, memory_notes={}, with_witness={}",
-                wallet_id,
-                memory_notes.len(),
-                notes_with_memory_witness
+                "[Orchard Sync] Returning {} notes with witnesses from memory for wallet {}",
+                result.len(),
+                wallet_id
             );
-
-            // If we have notes with witnesses in memory, use them
-            if notes_with_memory_witness > 0 {
-                let result: Vec<_> = memory_notes.into_iter()
-                    .filter(|n| n.witness_data.is_some())
-                    .collect();
-                tracing::info!(
-                    "[Orchard Sync] Returning {} notes with witnesses from memory for wallet {}",
-                    result.len(),
-                    wallet_id
-                );
-                return result;
-            }
+            return result;
+        }
 
             // Otherwise, try to load notes directly from database (including witness data)
             if let Some(repo) = &self.db_repo {
@@ -1465,7 +1448,7 @@ impl OrchardSyncService {
                             let note = OrchardNote {
                                 id: Some(db_note.id as i64),
                                 wallet_id: Some(wallet_id),
-                                account_id: vk.account_index,
+                                account_id: 0, // Legacy field, wallet_id is now the primary key
                                 tx_hash: db_note.tx_hash.clone(),
                                 block_height: db_note.block_height,
                                 note_commitment: [0u8; 32], // Not stored in DB
@@ -1506,21 +1489,18 @@ impl OrchardSyncService {
             }
 
             // Fallback: return memory notes filtered by witness
+            // No need to filter by wallet_id - notes are now stored by wallet_id in scanner
             let result: Vec<_> = memory_notes.into_iter()
                 .filter(|n| n.witness_data.is_some())
                 .collect();
 
             tracing::info!(
-                "[Orchard Sync] Returning {} notes with witnesses for wallet {}",
+                "[Orchard Sync] Returning {} notes with witnesses for wallet {} (fallback)",
                 result.len(),
                 wallet_id
             );
 
             result
-        } else {
-            tracing::warn!("[Orchard Sync] Wallet {} not registered, returning empty notes", wallet_id);
-            vec![]
-        }
     }
 
     /// Maximum anchor age in blocks before witnesses need to be refreshed
@@ -1830,19 +1810,13 @@ impl OrchardSyncService {
             })
             .collect();
 
-        // Get fresh witnesses from scanner
+        // Get fresh witnesses from scanner (now uses wallet_id directly)
         let notes_with_witnesses = {
             let scanner = self.scanner.read().await;
-            let keys = self.wallet_keys.read().await;
-
-            if let Some(vk) = keys.get(&wallet_id) {
-                scanner.get_spendable_notes(vk.account_index, chain_tip)
-                    .into_iter()
-                    .filter(|n| note_nullifiers.contains(&n.nullifier) && n.witness_data.is_some())
-                    .collect::<Vec<_>>()
-            } else {
-                vec![]
-            }
+            scanner.get_spendable_notes(wallet_id, chain_tip)
+                .into_iter()
+                .filter(|n| note_nullifiers.contains(&n.nullifier) && n.witness_data.is_some())
+                .collect::<Vec<_>>()
         };
 
         tracing::info!(
@@ -1948,8 +1922,8 @@ impl OrchardSyncService {
             let mut error_count = 0;
             let mut processed_nullifiers = std::collections::HashSet::new();
 
-            for (_wallet_id, vk) in keys.iter() {
-                let notes = scanner.get_spendable_notes(vk.account_index, chain_height);
+            for (wallet_id, _vk) in keys.iter() {
+                let notes = scanner.get_spendable_notes(*wallet_id, chain_height);
 
                 for note in notes {
                     // Skip if already processed (deduplication)

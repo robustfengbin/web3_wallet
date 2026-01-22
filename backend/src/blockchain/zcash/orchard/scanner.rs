@@ -234,8 +234,8 @@ pub struct OrchardScanner {
     /// Commitment tree tracker for Orchard pool (using incrementalmerkletree)
     tree_tracker: OrchardTreeTracker,
 
-    /// Scanned notes by account
-    notes: HashMap<u32, Vec<OrchardNote>>,
+    /// Scanned notes by wallet_id (each wallet has its own note collection)
+    notes: HashMap<i32, Vec<OrchardNote>>,
 
     /// Known nullifiers (spent notes)
     spent_nullifiers: Vec<[u8; 32]>,
@@ -299,10 +299,10 @@ impl OrchardScanner {
         &self.progress
     }
 
-    /// Get all unspent notes for an account
-    pub fn get_unspent_notes(&self, account_id: u32) -> Vec<OrchardNote> {
+    /// Get all unspent notes for a wallet
+    pub fn get_unspent_notes(&self, wallet_id: i32) -> Vec<OrchardNote> {
         self.notes
-            .get(&account_id)
+            .get(&wallet_id)
             .map(|notes| {
                 notes
                     .iter()
@@ -313,14 +313,14 @@ impl OrchardScanner {
             .unwrap_or_default()
     }
 
-    /// Get spendable notes (confirmed and not spent)
+    /// Get spendable notes (confirmed and not spent) for a wallet
     ///
     /// IMPORTANT: Always fetches fresh witness data from tree_tracker.
     /// The tree_tracker maintains up-to-date witnesses as new commitments are appended.
     /// The witness root must match the current tree state for valid transactions.
-    pub fn get_spendable_notes(&self, account_id: u32, current_height: u64) -> Vec<OrchardNote> {
+    pub fn get_spendable_notes(&self, wallet_id: i32, current_height: u64) -> Vec<OrchardNote> {
         self.notes
-            .get(&account_id)
+            .get(&wallet_id)
             .map(|notes| {
                 notes
                     .iter()
@@ -348,18 +348,18 @@ impl OrchardScanner {
             .unwrap_or_default()
     }
 
-    /// Get total shielded balance for an account
-    pub fn get_balance(&self, account_id: u32) -> u64 {
+    /// Get total shielded balance for a wallet
+    pub fn get_balance(&self, wallet_id: i32) -> u64 {
         self.notes
-            .get(&account_id)
+            .get(&wallet_id)
             .map(|notes| notes.iter().filter(|n| !n.is_spent).map(|n| n.value_zatoshis).sum())
             .unwrap_or(0)
     }
 
-    /// Get spendable balance (confirmed notes only)
-    pub fn get_spendable_balance(&self, account_id: u32, current_height: u64) -> u64 {
+    /// Get spendable balance (confirmed notes only) for a wallet
+    pub fn get_spendable_balance(&self, wallet_id: i32, current_height: u64) -> u64 {
         self.notes
-            .get(&account_id)
+            .get(&wallet_id)
             .map(|notes| {
                 notes
                     .iter()
@@ -485,11 +485,18 @@ impl OrchardScanner {
 
                         found_notes.push(note.clone());
 
-                        // Store the note
-                        self.notes
-                            .entry(note.account_id)
-                            .or_insert_with(Vec::new)
-                            .push(note);
+                        // Store the note by wallet_id (each wallet has isolated notes)
+                        if let Some(wallet_id) = note.wallet_id {
+                            self.notes
+                                .entry(wallet_id)
+                                .or_insert_with(Vec::new)
+                                .push(note);
+                        } else {
+                            tracing::warn!(
+                                "[Orchard Scan] Note has no wallet_id, skipping storage. tx={}",
+                                &tx.hash[..16]
+                            );
+                        }
                     }
 
                     // Check for spent notes

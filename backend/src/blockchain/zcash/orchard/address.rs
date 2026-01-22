@@ -10,10 +10,8 @@
 use super::{keys::OrchardViewingKey, OrchardError, OrchardResult};
 use orchard::Address as OrchardAddress;
 use serde::{Deserialize, Serialize};
-use zcash_address::{
-    unified::{self, Container, Encoding, Receiver},
-    Network,
-};
+use zcash_address::unified::{self, Container, Encoding, Receiver};
+use zcash_protocol::consensus::NetworkType;
 
 /// Information about a unified address
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,7 +291,7 @@ impl OrchardAddressManager {
         })?;
 
         // Encode for mainnet
-        let address = ua.encode(&Network::Main);
+        let address = ua.encode(&NetworkType::Main);
 
         Ok(address)
     }
@@ -341,7 +339,7 @@ impl OrchardAddressManager {
             OrchardError::InvalidUnifiedAddress(format!("Failed to create unified address: {:?}", e))
         })?;
 
-        Ok(ua.encode(&Network::Main))
+        Ok(ua.encode(&NetworkType::Main))
     }
 
     /// Decode unified address to receivers using the proper zcash_address crate
@@ -352,7 +350,7 @@ impl OrchardAddressManager {
         })?;
 
         // Check network (mainnet)
-        if network != Network::Main {
+        if network != NetworkType::Main {
             tracing::warn!("Address is for network {:?}, expected mainnet", network);
         }
 

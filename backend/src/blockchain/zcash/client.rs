@@ -731,8 +731,8 @@ impl ZcashClient {
         Ok(())
     }
 
-    /// Get shielded balance for an account
-    pub async fn get_orchard_balance(&self, account_id: u32) -> AppResult<ShieldedBalance> {
+    /// Get shielded balance for a wallet
+    pub async fn get_orchard_balance(&self, wallet_id: i32) -> AppResult<ShieldedBalance> {
         let scanner_lock = self.orchard_scanner.read().await;
 
         let scanner = scanner_lock.as_ref().ok_or_else(|| {
@@ -740,9 +740,9 @@ impl ZcashClient {
         })?;
 
         let current_height = self.get_block_count().await?;
-        let total = scanner.get_balance(account_id);
-        let spendable = scanner.get_spendable_balance(account_id, current_height);
-        let notes = scanner.get_unspent_notes(account_id);
+        let total = scanner.get_balance(wallet_id);
+        let spendable = scanner.get_spendable_balance(wallet_id, current_height);
+        let notes = scanner.get_unspent_notes(wallet_id);
 
         Ok(ShieldedBalance::new(
             ShieldedPool::Orchard,
@@ -779,7 +779,7 @@ impl ZcashClient {
         })?;
 
         let current_height = self.get_block_count().await?;
-        let spendable_notes = scanner.get_spendable_notes(params.account_id, current_height);
+        let spendable_notes = scanner.get_spendable_notes(params.wallet_id, current_height);
 
         if spendable_notes.is_empty() {
             return Err(AppError::ValidationError(
@@ -798,8 +798,8 @@ impl ZcashClient {
         let consensus_branch_id = u32::from_str_radix(&blockchain_info.consensus.chaintip, 16)
             .map_err(|e| AppError::BlockchainError(format!("Invalid branch ID: {}", e)))?;
 
-        // Derive spending key
-        let (spending_key, _) = OrchardKeyManager::derive_from_private_key(private_key_hex, params.account_id, 0)
+        // Derive spending key (account_index is always 0 since each wallet has its own private key)
+        let (spending_key, _) = OrchardKeyManager::derive_from_private_key(private_key_hex, 0, 0)
             .map_err(|e| AppError::InternalError(format!("Failed to derive spending key: {}", e)))?;
 
         // Build transaction
@@ -858,10 +858,10 @@ impl ZcashClient {
         Ok(tx_hash)
     }
 
-    /// Get Orchard transaction history for an account
+    /// Get Orchard transaction history for a wallet
     pub async fn get_orchard_transactions(
         &self,
-        account_id: u32,
+        wallet_id: i32,
         limit: u32,
     ) -> AppResult<Vec<OrchardTransactionInfo>> {
         let scanner_lock = self.orchard_scanner.read().await;
@@ -869,7 +869,7 @@ impl ZcashClient {
             AppError::BlockchainError("Orchard scanner not initialized".to_string())
         })?;
 
-        let notes = scanner.get_unspent_notes(account_id);
+        let notes = scanner.get_unspent_notes(wallet_id);
 
         // Convert notes to transaction info
         let transactions: Vec<OrchardTransactionInfo> = notes
