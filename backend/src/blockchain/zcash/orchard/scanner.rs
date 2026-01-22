@@ -768,6 +768,75 @@ impl OrchardScanner {
     pub fn viewing_key_count(&self) -> usize {
         self.viewing_keys.len()
     }
+
+    /// Append commitments to the tree without decryption
+    ///
+    /// This is an optimized method for witness refresh - it only updates the
+    /// commitment tree without attempting to decrypt notes. Use this when you
+    /// already know which notes are yours and just need to update their witnesses.
+    ///
+    /// Returns the number of commitments appended.
+    pub fn append_commitments_only(&mut self, commitments: &[[u8; 32]], block_height: u64) -> Result<usize, super::OrchardError> {
+        let count = commitments.len();
+
+        for cmx in commitments {
+            self.tree_tracker.append_commitment(cmx)
+                .map_err(|e| super::OrchardError::Scanner(format!("Failed to append commitment: {}", e)))?;
+        }
+
+        self.tree_tracker.set_block_height(block_height);
+        self.progress.last_scanned_height = block_height;
+
+        Ok(count)
+    }
+
+    /// Append commitments and mark specific positions for witness tracking
+    ///
+    /// This is used when rebuilding tree state from a frontier. If we already
+    /// know which positions contain our notes (from database), we can mark them
+    /// without decryption.
+    ///
+    /// `mark_positions` is a sorted list of global tree positions to mark.
+    /// `start_position` is the current tree position before appending.
+    ///
+    /// Returns the number of commitments appended.
+    pub fn append_commitments_with_marks(
+        &mut self,
+        commitments: &[[u8; 32]],
+        start_position: u64,
+        mark_positions: &[u64],
+        block_height: u64,
+    ) -> Result<usize, super::OrchardError> {
+        let count = commitments.len();
+        let mut current_pos = start_position;
+        let mark_set: std::collections::HashSet<u64> = mark_positions.iter().cloned().collect();
+
+        for cmx in commitments {
+            if mark_set.contains(&current_pos) {
+                // This position contains our note - mark it for witness tracking
+                self.tree_tracker.append_and_mark(cmx)
+                    .map_err(|e| super::OrchardError::Scanner(format!("Failed to append and mark: {}", e)))?;
+                tracing::debug!(
+                    "[OrchardScanner] Marked position {} for witness tracking",
+                    current_pos
+                );
+            } else {
+                self.tree_tracker.append_commitment(cmx)
+                    .map_err(|e| super::OrchardError::Scanner(format!("Failed to append commitment: {}", e)))?;
+            }
+            current_pos += 1;
+        }
+
+        self.tree_tracker.set_block_height(block_height);
+        self.progress.last_scanned_height = block_height;
+
+        Ok(count)
+    }
+
+    /// Get mutable access to tree tracker for witness operations
+    pub fn tree_tracker_mut(&mut self) -> &mut OrchardTreeTracker {
+        &mut self.tree_tracker
+    }
 }
 
 /// Compact block data for scanning
