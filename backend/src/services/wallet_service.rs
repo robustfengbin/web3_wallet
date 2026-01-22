@@ -472,16 +472,11 @@ impl WalletService {
             ));
         }
 
-        // Ensure sync service is initialized and sync before getting balance
+        // Ensure sync service is initialized (don't sync here - it's too slow)
+        // Sync happens in background task or via explicit /sync endpoint
         self.ensure_orchard_sync_initialized().await?;
 
-        // Sync to get latest balance
-        if let Err(e) = self.sync_orchard_internal().await {
-            tracing::warn!("Failed to sync before getting balance: {}", e);
-            // Continue anyway to return cached balance
-        }
-
-        // Get balance from Orchard sync service
+        // Get balance from Orchard sync service (cached, fast)
         let orchard_sync = self.orchard_sync.read().await;
         if let Some(sync_service) = orchard_sync.as_ref() {
             let balance = sync_service.get_wallet_balance(wallet_id).await;
