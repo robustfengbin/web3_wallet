@@ -152,9 +152,35 @@ export function Wallets() {
     }
   };
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setSuccess(t('wallets.copiedToClipboard'));
+  const copyToClipboard = async (text: string) => {
+    if (!text) {
+      setError(t('wallets.copyFailed', 'No address to copy'));
+      return;
+    }
+
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const textArea = document.createElement('textarea');
+        textArea.value = text;
+        textArea.style.position = 'fixed';
+        textArea.style.left = '-999999px';
+        textArea.style.top = '-999999px';
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        const successful = document.execCommand('copy');
+        document.body.removeChild(textArea);
+        if (!successful) {
+          throw new Error('execCommand copy failed');
+        }
+      }
+      setSuccess(t('wallets.copiedToClipboard'));
+    } catch (err) {
+      console.error('Copy to clipboard failed:', err);
+      setError(t('wallets.copyFailed', 'Failed to copy to clipboard'));
+    }
   };
 
   const isAdmin = user?.role === 'admin';

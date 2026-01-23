@@ -273,13 +273,28 @@ This system is designed for enterprise-grade cryptocurrency management with priv
 ### Dashboard
 ![Dashboard](docs/images/dashboard.png)
 
-### Wallet Management
-![Wallet](docs/images/wallet.jpg)
+### Zcash Wallet Management
+Zcash wallet with unified addresses, transparent/shielded balance display, and Privacy Notes viewer.
+![Zcash Wallet](docs/images/zcash_account.jpg)
 
-### Transfer
-![Transfer](docs/images/transfer.jpg)
+### Ethereum Transfer
+ERC20 token transfer with EIP-1559 gas estimation and balance preview.
+![Ethereum Transfer](docs/images/transfer.jpg)
+
+### Zcash Privacy Transfer (Z→Z)
+Shielded-to-shielded transfer with encrypted memo and Halo 2 proof generation.
+![Zcash Privacy Transfer](docs/images/prepare_transfer_z_z.jpg)
+
+### Transfer Success
+Transaction submitted successfully with transaction hash.
+![Transfer Success](docs/images/transfer_tx.jpg)
+
+### Transfer History
+Complete transfer history with shielded transaction tracking.
+![Transfer History](docs/images/transfer_his.jpg)
 
 ### RPC Node Settings
+Multi-provider RPC configuration with Alchemy, Infura, QuickNode support.
 ![RPC Settings](docs/images/node_rpc.jpg)
 
 ## Tech Stack

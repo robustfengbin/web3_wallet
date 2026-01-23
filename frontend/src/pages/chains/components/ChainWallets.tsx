@@ -196,12 +196,36 @@ export function ChainWallets({ chainId }: ChainWalletsProps) {
   };
 
   const copyToClipboard = async (text: string) => {
+    if (!text) {
+      setError(t('wallets.copyFailed', 'No address to copy'));
+      return;
+    }
+
     try {
-      await navigator.clipboard.writeText(text);
+      // Try modern clipboard API first
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        // Fallback for older browsers or non-secure contexts
+        const textArea = document.createElement('textarea');
+        textArea.value = text;
+        textArea.style.position = 'fixed';
+        textArea.style.left = '-999999px';
+        textArea.style.top = '-999999px';
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        const successful = document.execCommand('copy');
+        document.body.removeChild(textArea);
+        if (!successful) {
+          throw new Error('execCommand copy failed');
+        }
+      }
       setCopiedAddress(text);
       setSuccess(t('wallets.copiedToClipboard'));
       setTimeout(() => setCopiedAddress(null), 2000);
     } catch (err) {
+      console.error('Copy to clipboard failed:', err);
       setError(t('wallets.copyFailed', 'Failed to copy to clipboard'));
     }
   };
