@@ -19,6 +19,37 @@
 
 ---
 
+## 界面预览
+
+### 仪表盘
+![仪表盘](docs/images/dashboard.png)
+
+### Zcash 钱包管理
+Zcash 钱包页面，显示统一地址、透明/隐私余额、Privacy Notes 查看器。
+![Zcash钱包](docs/images/zcash_account.jpg)
+
+### 以太坊转账
+ERC20 代币转账，支持 EIP-1559 Gas 估算和余额变动预览。
+![以太坊转账](docs/images/transfer.jpg)
+
+### Zcash 隐私转账 (Z→Z)
+隐私到隐私转账，支持加密备忘录和 Halo 2 证明生成。
+![Zcash隐私转账](docs/images/prepare_transfer_z_z.jpg)
+
+### 转账成功
+交易提交成功，显示交易哈希。
+![转账成功](docs/images/transfer_tx.jpg)
+
+### 转账历史
+完整的转账历史记录，支持隐私交易追踪。
+![转账历史](docs/images/transfer_his.jpg)
+
+### RPC 节点设置
+多服务商 RPC 配置，支持 Alchemy、Infura、QuickNode 等。
+![RPC设置](docs/images/node_rpc.jpg)
+
+---
+
 ## 产品愿景与路线图
 
 我们正在构建 **企业级 Web3 隐私金融基础设施** — 让企业可以在公链上，像使用银行系统一样，安全、私密、可控地转移资金。
@@ -267,35 +298,6 @@ pub enum FundSource {
 | 密钥管理 | 基于环境变量配置 |
 
 ---
-
-## 界面预览
-
-### 仪表盘
-![仪表盘](docs/images/dashboard.png)
-
-### Zcash 钱包管理
-Zcash 钱包页面，显示统一地址、透明/隐私余额、Privacy Notes 查看器。
-![Zcash钱包](docs/images/zcash_account.jpg)
-
-### 以太坊转账
-ERC20 代币转账，支持 EIP-1559 Gas 估算和余额变动预览。
-![以太坊转账](docs/images/transfer.jpg)
-
-### Zcash 隐私转账 (Z→Z)
-隐私到隐私转账，支持加密备忘录和 Halo 2 证明生成。
-![Zcash隐私转账](docs/images/prepare_transfer_z_z.jpg)
-
-### 转账成功
-交易提交成功，显示交易哈希。
-![转账成功](docs/images/transfer_tx.jpg)
-
-### 转账历史
-完整的转账历史记录，支持隐私交易追踪。
-![转账历史](docs/images/transfer_his.jpg)
-
-### RPC 节点设置
-多服务商 RPC 配置，支持 Alchemy、Infura、QuickNode 等。
-![RPC设置](docs/images/node_rpc.jpg)
 
 ## 技术栈
 
