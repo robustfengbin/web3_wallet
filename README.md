@@ -278,16 +278,13 @@ github_web3_wallet_service/
 │   │   └── config/            # Configuration management
 │   └── Cargo.toml
 │
-├── frontend/                   # React TypeScript frontend
-│   ├── src/
-│   │   ├── pages/             # Page components
-│   │   ├── components/        # Reusable UI components
-│   │   ├── services/          # API client modules
-│   │   └── hooks/             # Custom React hooks
-│   └── package.json
-│
-└── docs/                       # Documentation
-    └── chrome-extension-technical-proposal.md
+└── frontend/                   # React TypeScript frontend
+    ├── src/
+    │   ├── pages/             # Page components
+    │   ├── components/        # Reusable UI components
+    │   ├── services/          # API client modules
+    │   └── hooks/             # Custom React hooks
+    └── package.json
 ```
 
 ## Quick Start
