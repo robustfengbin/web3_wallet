@@ -19,6 +19,44 @@ A modular Web3 wallet management service with multi-chain support, featuring a R
 
 ---
 
+## Product Vision & Roadmap
+
+We are building the **Enterprise-Grade Privacy Finance Infrastructure for Web3** — the world's first platform that enables companies to move money on public blockchains with the same privacy, security, and control as traditional financial systems.
+
+### What We Are Building
+
+> **Privacy-First Financial Operating System for Web3**
+>
+> *"Stripe + Treasury + Privacy Layer for Crypto"*
+
+A unified platform where enterprises can:
+- Accept, store, move, and settle digital assets
+- Use Zcash shielded pools for privacy
+- Use public chains for liquidity
+- Control who can move money and under what conditions
+- Generate compliance-ready audit trails
+
+### 2026 Roadmap
+
+| Quarter | Focus | Key Deliverables |
+|---------|-------|------------------|
+| **Q1** | Enterprise Reliability | End-to-end transaction tracking, auto failover, real-time dashboards |
+| **Q2** | Compliance & Governance | Multi-user approval workflows, audit trails, enterprise webhooks |
+| **Q3** | High-Volume Privacy | Optimized Orchard sync, large-value transfers, unified balance management |
+| **Q4** | Privacy Finance Platform | Developer SDKs, multi-chain treasury, HSM/KMS integrations |
+
+### Long-Term Vision
+
+By 2026, we will power:
+- Crypto exchanges protecting user deposits
+- OTC desks settling billion-dollar trades privately
+- Payment processors offering privacy by default
+- Web3 companies running confidential payroll and treasury
+
+> 📄 **[Read Full Roadmap (English)](docs/product-roadmap-2026.md)** | **[中文版](docs/product-roadmap-2026-cn.md)**
+
+---
+
 ## Zcash Privacy Transfer Modes
 
 The system implements **all four Zcash transfer modes**, providing complete flexibility for privacy management:
