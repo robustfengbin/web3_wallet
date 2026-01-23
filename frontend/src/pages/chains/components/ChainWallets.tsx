@@ -7,11 +7,17 @@ import {
   CheckCircle,
   RefreshCw,
   Copy,
+  Check,
+  Shield,
+  Eye,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Card, LoadingSpinner, Modal } from '../../../components/Common';
 import { walletService } from '../../../services/api';
+import orchardApi from '../../../services/api/orchard';
 import { Wallet, BalanceResponse } from '../../../types';
+import type { UnifiedAddressInfo, ShieldedBalance, StoredOrchardNote } from '../../../types/orchard';
+import { zatoshisToZec } from '../../../types/orchard';
 import { useAuth } from '../../../hooks/useAuth';
 import { getChain, ChainConfig } from '../../../config/chains';
 
@@ -26,6 +32,8 @@ export function ChainWallets({ chainId }: ChainWalletsProps) {
 
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [balances, setBalances] = useState<Record<string, BalanceResponse>>({});
+  const [shieldedBalances, setShieldedBalances] = useState<Record<number, ShieldedBalance>>({});
+  const [unifiedAddresses, setUnifiedAddresses] = useState<Record<number, UnifiedAddressInfo>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -34,7 +42,13 @@ export function ChainWallets({ chainId }: ChainWalletsProps) {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [showExportModal, setShowExportModal] = useState(false);
+  const [showPrivacyAddressModal, setShowPrivacyAddressModal] = useState(false);
+  const [showNotesModal, setShowNotesModal] = useState(false);
   const [selectedWalletId, setSelectedWalletId] = useState<number | null>(null);
+  const [selectedNotes, setSelectedNotes] = useState<StoredOrchardNote[]>([]);
+  const [loadingNotes, setLoadingNotes] = useState(false);
+  const [generatingPrivacyAddress, setGeneratingPrivacyAddress] = useState<number | null>(null);
+  const [copiedAddress, setCopiedAddress] = useState<string | null>(null);
 
   // Form states
   const [walletName, setWalletName] = useState('');
@@ -71,6 +85,38 @@ export function ChainWallets({ chainId }: ChainWalletsProps) {
         }
       });
       setBalances(newBalances);
+
+      // For Zcash wallets, load existing unified addresses and shielded balances
+      if (chainId === 'zcash') {
+        const addressPromises = data.map((w) =>
+          orchardApi.getUnifiedAddresses(w.id).catch(() => null)
+        );
+        const addressResults = await Promise.all(addressPromises);
+        const newUnifiedAddresses: Record<number, UnifiedAddressInfo> = {};
+        addressResults.forEach((addresses, index) => {
+          // Get the first unified address if exists
+          if (addresses && addresses.length > 0) {
+            newUnifiedAddresses[data[index].id] = addresses[0];
+          }
+        });
+        setUnifiedAddresses(newUnifiedAddresses);
+
+        // Load shielded balances for wallets with unified addresses
+        const walletsWithOrchard = data.filter((w) => newUnifiedAddresses[w.id]);
+        if (walletsWithOrchard.length > 0) {
+          const shieldedPromises = walletsWithOrchard.map((w) =>
+            orchardApi.getShieldedBalance(w.id).catch(() => null)
+          );
+          const shieldedResults = await Promise.all(shieldedPromises);
+          const newShieldedBalances: Record<number, ShieldedBalance> = {};
+          shieldedResults.forEach((balance, index) => {
+            if (balance) {
+              newShieldedBalances[walletsWithOrchard[index].id] = balance;
+            }
+          });
+          setShieldedBalances(newShieldedBalances);
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load wallets');
     } finally {
@@ -149,9 +195,59 @@ export function ChainWallets({ chainId }: ChainWalletsProps) {
     }
   };
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setSuccess(t('wallets.copiedToClipboard'));
+  const copyToClipboard = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedAddress(text);
+      setSuccess(t('wallets.copiedToClipboard'));
+      setTimeout(() => setCopiedAddress(null), 2000);
+    } catch (err) {
+      setError(t('wallets.copyFailed', 'Failed to copy to clipboard'));
+    }
+  };
+
+  // View privacy notes for a wallet
+  const handleViewNotes = async (walletId: number) => {
+    setLoadingNotes(true);
+    setSelectedWalletId(walletId);
+    setShowNotesModal(true);
+    try {
+      const notes = await orchardApi.getUnspentNotes(walletId);
+      setSelectedNotes(notes);
+    } catch (err) {
+      console.error('Error loading notes:', err);
+      setSelectedNotes([]);
+    } finally {
+      setLoadingNotes(false);
+    }
+  };
+
+  // Generate privacy address for Zcash wallet
+  const handleGeneratePrivacyAddress = async (walletId: number) => {
+    setGeneratingPrivacyAddress(walletId);
+    setError('');
+    try {
+      const response = await orchardApi.enableOrchard({
+        wallet_id: walletId,
+        birthday_height: 2000000, // TODO: Get current block height
+      });
+      console.log('Orchard enable response:', response);
+      if (response && response.unified_address && response.unified_address.address) {
+        setUnifiedAddresses((prev) => ({
+          ...prev,
+          [walletId]: response.unified_address,
+        }));
+        setSuccess(t('zcash.orchard.enableSuccess', 'Privacy address generated successfully!'));
+      } else {
+        console.error('Invalid response structure:', response);
+        setError('Unexpected response format from server');
+      }
+    } catch (err: any) {
+      console.error('Error generating privacy address:', err);
+      setError(err.response?.data?.message || err.message || 'Failed to generate privacy address');
+    } finally {
+      setGeneratingPrivacyAddress(null);
+    }
   };
 
   const isAdmin = user?.role === 'admin';
@@ -236,24 +332,108 @@ export function ChainWallets({ chainId }: ChainWalletsProps) {
                   )}
                 </div>
 
+                {/* Transparent Address */}
                 <div className="mt-2 flex items-center">
                   <code className="text-sm text-gray-600 bg-gray-100 px-2 py-1 rounded">
                     {wallet.address}
                   </code>
                   <button
                     onClick={() => copyToClipboard(wallet.address)}
-                    className="ml-2 text-gray-400 hover:text-gray-600"
+                    className={`ml-2 transition-colors ${copiedAddress === wallet.address ? 'text-green-500' : 'text-gray-400 hover:text-gray-600'}`}
+                    title={copiedAddress === wallet.address ? t('wallets.copied', 'Copied!') : t('common.copy')}
                   >
-                    <Copy className="w-4 h-4" />
+                    {copiedAddress === wallet.address ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                   </button>
                 </div>
+
+                {/* Zcash Privacy Address Section */}
+                {chainId === 'zcash' && (
+                  <div className="mt-3">
+                    {unifiedAddresses[wallet.id]?.address ? (
+                      // Show unified address if already generated
+                      <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Shield className="w-4 h-4 text-green-600" />
+                          <span className="text-sm font-medium text-green-800">
+                            {t('zcash.orchard.privacyAddress', 'Privacy Address (Unified)')}
+                          </span>
+                        </div>
+                        <div className="flex items-center">
+                          <code className="text-xs text-green-700 bg-green-100 px-2 py-1 rounded break-all">
+                            {unifiedAddresses[wallet.id].address.slice(0, 30)}...
+                          </code>
+                          <button
+                            onClick={() => copyToClipboard(unifiedAddresses[wallet.id]?.address || '')}
+                            className={`ml-2 transition-colors ${copiedAddress === unifiedAddresses[wallet.id]?.address ? 'text-green-800' : 'text-green-600 hover:text-green-800'}`}
+                            title={copiedAddress === unifiedAddresses[wallet.id]?.address ? t('wallets.copied', 'Copied!') : t('common.copy')}
+                          >
+                            {copiedAddress === unifiedAddresses[wallet.id]?.address ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      // Show generate button if not generated
+                      <button
+                        onClick={() => handleGeneratePrivacyAddress(wallet.id)}
+                        disabled={generatingPrivacyAddress === wallet.id}
+                        className="flex items-center gap-2 px-3 py-2 text-sm bg-yellow-100 text-yellow-800 rounded-lg hover:bg-yellow-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      >
+                        {generatingPrivacyAddress === wallet.id ? (
+                          <>
+                            <LoadingSpinner size="sm" />
+                            {t('zcash.orchard.generating', 'Generating...')}
+                          </>
+                        ) : (
+                          <>
+                            <Shield className="w-4 h-4" />
+                            {t('zcash.orchard.generatePrivacyAddress', 'Generate Privacy Address')}
+                          </>
+                        )}
+                      </button>
+                    )}
+                  </div>
+                )}
 
                 {balances[wallet.address] && (
                   <div className="mt-3">
                     <p className="text-sm text-gray-500">{t('wallets.balance')}</p>
-                    <p className="text-lg font-semibold">
-                      {parseFloat(balances[wallet.address].native_balance).toFixed(6)} {chain.symbol}
-                    </p>
+                    {/* For Zcash: show total balance (transparent + shielded) */}
+                    {chainId === 'zcash' && shieldedBalances[wallet.id] ? (
+                      <div>
+                        <p className="text-lg font-semibold">
+                          {(parseFloat(balances[wallet.address].native_balance) + zatoshisToZec(shieldedBalances[wallet.id].total_zatoshis)).toFixed(6)} {chain.symbol}
+                        </p>
+                        <div className="mt-1 text-sm text-gray-500 space-y-1">
+                          <div className="flex items-center justify-between">
+                            <span>{t('zcash.transparentBalance', 'Transparent')}:</span>
+                            <span>{parseFloat(balances[wallet.address].native_balance).toFixed(6)} {chain.symbol}</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="flex items-center gap-1">
+                              <Shield className="w-3 h-3 text-green-600" />
+                              {t('zcash.shieldedBalance', 'Shielded')}:
+                            </span>
+                            <span className="flex items-center gap-2">
+                              {zatoshisToZec(shieldedBalances[wallet.id].total_zatoshis).toFixed(6)} {chain.symbol}
+                              {shieldedBalances[wallet.id].note_count > 0 && (
+                                <button
+                                  onClick={() => handleViewNotes(wallet.id)}
+                                  className="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1"
+                                  title={t('zcash.viewNotes', 'View notes')}
+                                >
+                                  <Eye className="w-3 h-3" />
+                                  ({shieldedBalances[wallet.id].note_count})
+                                </button>
+                              )}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-lg font-semibold">
+                        {parseFloat(balances[wallet.address].native_balance).toFixed(6)} {chain.symbol}
+                      </p>
+                    )}
                     {balances[wallet.address].tokens.length > 0 && (
                       <div className="mt-1 flex flex-wrap gap-2">
                         {balances[wallet.address].tokens.map((token) => (
@@ -489,9 +669,9 @@ export function ChainWallets({ chainId }: ChainWalletsProps) {
               <div className="flex justify-end space-x-3">
                 <button
                   onClick={() => copyToClipboard(exportedKey)}
-                  className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700"
+                  className={`px-4 py-2 text-white rounded-lg transition-colors ${copiedAddress === exportedKey ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-600 hover:bg-gray-700'}`}
                 >
-                  {t('common.copy')}
+                  {copiedAddress === exportedKey ? t('wallets.copied', 'Copied!') : t('common.copy')}
                 </button>
                 <button
                   onClick={() => {
@@ -506,6 +686,94 @@ export function ChainWallets({ chainId }: ChainWalletsProps) {
               </div>
             </>
           )}
+        </div>
+      </Modal>
+
+      {/* Privacy Notes Modal */}
+      <Modal
+        isOpen={showNotesModal}
+        onClose={() => {
+          setShowNotesModal(false);
+          setSelectedNotes([]);
+        }}
+        title={t('zcash.privacyNotes', 'Privacy Notes')}
+      >
+        <div className="space-y-4">
+          {loadingNotes ? (
+            <div className="flex items-center justify-center py-8">
+              <LoadingSpinner size="lg" />
+            </div>
+          ) : selectedNotes.length === 0 ? (
+            <p className="text-center text-gray-500 py-8">
+              {t('zcash.noNotes', 'No privacy notes found')}
+            </p>
+          ) : (
+            <>
+              <div className="text-sm text-gray-600 mb-2">
+                {t('zcash.orchard.notesCount', { count: selectedNotes.length })}
+              </div>
+              <div className="max-h-96 overflow-y-auto space-y-3">
+                {selectedNotes.map((note) => (
+                  <div
+                    key={note.id}
+                    className="p-3 bg-gray-50 border border-gray-200 rounded-lg"
+                  >
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="font-semibold text-green-700">
+                        {note.value_zec.toFixed(8)} ZEC
+                      </span>
+                      <span className="text-xs text-gray-500">
+                        {t('zcash.blockHeight', 'Block')}: {note.block_height.toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="text-xs text-gray-500 space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium">{t('zcash.txHash', 'TX')}:</span>
+                        <code className="bg-gray-100 px-1 rounded">
+                          {note.tx_hash.slice(0, 16)}...{note.tx_hash.slice(-8)}
+                        </code>
+                        <button
+                          onClick={() => copyToClipboard(note.tx_hash)}
+                          className="text-gray-400 hover:text-gray-600"
+                        >
+                          {copiedAddress === note.tx_hash ? (
+                            <Check className="w-3 h-3 text-green-500" />
+                          ) : (
+                            <Copy className="w-3 h-3" />
+                          )}
+                        </button>
+                      </div>
+                      {note.memo && (
+                        <div>
+                          <span className="font-medium">{t('zcash.memo', 'Memo')}:</span>{' '}
+                          {note.memo}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="pt-2 border-t border-gray-200">
+                <div className="flex items-center justify-between text-sm font-semibold">
+                  <span>{t('zcash.totalShielded', 'Total Shielded')}:</span>
+                  <span className="text-green-700">
+                    {selectedNotes.reduce((sum, n) => sum + n.value_zec, 0).toFixed(8)} ZEC
+                  </span>
+                </div>
+              </div>
+            </>
+          )}
+          <div className="flex justify-end">
+            <button
+              onClick={() => {
+                setShowNotesModal(false);
+                setSelectedNotes([]);
+              }}
+              className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700"
+            >
+              {t('common.close')}
+            </button>
+          </div>
         </div>
       </Modal>
     </div>

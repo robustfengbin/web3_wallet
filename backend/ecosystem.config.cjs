@@ -11,7 +11,7 @@ module.exports = {
       max_restarts: 10,
       restart_delay: 3000,
       env: {
-        RUST_LOG: 'info,sqlx=warn',
+        RUST_LOG: 'debug,sqlx=warn,hyper=info,reqwest=info',
         RUST_BACKTRACE: '1',
       },
       // 合并日志到单个文件

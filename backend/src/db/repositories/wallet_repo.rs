@@ -17,23 +17,35 @@ impl WalletRepository {
         address: &str,
         encrypted_private_key: &str,
         chain: &str,
+        orchard_birthday_height: Option<u64>,
     ) -> AppResult<i32> {
         let result = sqlx::query(
-            "INSERT INTO wallets (name, address, encrypted_private_key, chain) VALUES (?, ?, ?, ?)"
+            "INSERT INTO wallets (name, address, encrypted_private_key, chain, orchard_birthday_height) VALUES (?, ?, ?, ?, ?)"
         )
         .bind(name)
         .bind(address)
         .bind(encrypted_private_key)
         .bind(chain)
+        .bind(orchard_birthday_height)
         .execute(&self.pool)
         .await?;
 
         Ok(result.last_insert_id() as i32)
     }
 
+    #[allow(dead_code)]
+    pub async fn update_birthday_height(&self, id: i32, birthday_height: u64) -> AppResult<()> {
+        sqlx::query("UPDATE wallets SET orchard_birthday_height = ? WHERE id = ?")
+            .bind(birthday_height)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn find_by_id(&self, id: i32) -> AppResult<Option<Wallet>> {
         let wallet = sqlx::query_as::<_, Wallet>(
-            "SELECT id, name, address, encrypted_private_key, chain, is_active, created_at FROM wallets WHERE id = ?"
+            "SELECT id, name, address, encrypted_private_key, chain, is_active, created_at, orchard_birthday_height FROM wallets WHERE id = ?"
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -44,7 +56,7 @@ impl WalletRepository {
 
     pub async fn find_by_address(&self, address: &str, chain: &str) -> AppResult<Option<Wallet>> {
         let wallet = sqlx::query_as::<_, Wallet>(
-            "SELECT id, name, address, encrypted_private_key, chain, is_active, created_at FROM wallets WHERE address = ? AND chain = ?"
+            "SELECT id, name, address, encrypted_private_key, chain, is_active, created_at, orchard_birthday_height FROM wallets WHERE address = ? AND chain = ?"
         )
         .bind(address)
         .bind(chain)
@@ -56,7 +68,7 @@ impl WalletRepository {
 
     pub async fn list_all(&self) -> AppResult<Vec<Wallet>> {
         let wallets = sqlx::query_as::<_, Wallet>(
-            "SELECT id, name, address, encrypted_private_key, chain, is_active, created_at FROM wallets ORDER BY id"
+            "SELECT id, name, address, encrypted_private_key, chain, is_active, created_at, orchard_birthday_height FROM wallets ORDER BY id"
         )
         .fetch_all(&self.pool)
         .await?;
@@ -66,7 +78,7 @@ impl WalletRepository {
 
     pub async fn list_by_chain(&self, chain: &str) -> AppResult<Vec<Wallet>> {
         let wallets = sqlx::query_as::<_, Wallet>(
-            "SELECT id, name, address, encrypted_private_key, chain, is_active, created_at FROM wallets WHERE chain = ? ORDER BY id"
+            "SELECT id, name, address, encrypted_private_key, chain, is_active, created_at, orchard_birthday_height FROM wallets WHERE chain = ? ORDER BY id"
         )
         .bind(chain)
         .fetch_all(&self.pool)
@@ -77,7 +89,7 @@ impl WalletRepository {
 
     pub async fn get_active_wallet(&self, chain: &str) -> AppResult<Option<Wallet>> {
         let wallet = sqlx::query_as::<_, Wallet>(
-            "SELECT id, name, address, encrypted_private_key, chain, is_active, created_at FROM wallets WHERE chain = ? AND is_active = TRUE LIMIT 1"
+            "SELECT id, name, address, encrypted_private_key, chain, is_active, created_at, orchard_birthday_height FROM wallets WHERE chain = ? AND is_active = TRUE LIMIT 1"
         )
         .bind(chain)
         .fetch_optional(&self.pool)

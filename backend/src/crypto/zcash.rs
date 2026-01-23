@@ -1,8 +1,13 @@
+#![allow(dead_code)]
+
 use rand::RngCore;
 use ripemd::Ripemd160;
 use secp256k1::{PublicKey, Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
 
+use crate::blockchain::zcash::orchard::{
+    address::OrchardAddressManager, keys::OrchardKeyManager, OrchardViewingKey, UnifiedAddressInfo,
+};
 use crate::error::{AppError, AppResult};
 
 /// Zcash mainnet transparent address prefix (t1)
@@ -197,6 +202,133 @@ pub(crate) fn validate_zcash_address(address: &str) -> bool {
     }
 
     false
+}
+
+/// Enable Orchard for an existing wallet by deriving Orchard keys from transparent private key
+///
+/// # Arguments
+/// * `private_key_hex` - The transparent wallet's private key in hex format
+/// * `birthday_height` - Block height when wallet was created (for scanning)
+///
+/// # Returns
+/// * Tuple of (unified_address, viewing_key_encoded)
+pub fn enable_orchard_for_wallet(
+    private_key_hex: &str,
+    birthday_height: u64,
+) -> AppResult<(UnifiedAddressInfo, String)> {
+    // Derive Orchard keys from the transparent private key
+    let (spending_key, viewing_key) =
+        OrchardKeyManager::derive_from_private_key(private_key_hex, 0, birthday_height)
+            .map_err(|e| AppError::InternalError(format!("Failed to derive Orchard keys: {}", e)))?;
+
+    // Create address manager and generate unified address
+    let mut address_manager = OrchardAddressManager::new(viewing_key.clone());
+    let unified_address = address_manager
+        .generate_unified_address()
+        .map_err(|e| AppError::InternalError(format!("Failed to generate unified address: {}", e)))?;
+
+    // Encode the viewing key for storage
+    let viewing_key_encoded = viewing_key.encode();
+
+    // Zero out spending key by dropping it
+    drop(spending_key);
+
+    Ok((unified_address, viewing_key_encoded))
+}
+
+/// Generate a new Orchard-enabled wallet from seed
+///
+/// # Arguments
+/// * `seed` - 64-byte seed (e.g., from BIP39 mnemonic)
+/// * `birthday_height` - Current block height
+///
+/// # Returns
+/// * Tuple of (unified_address, transparent_address, private_key_hex, viewing_key_encoded)
+pub fn generate_orchard_wallet(
+    seed: &[u8],
+    birthday_height: u64,
+) -> AppResult<(UnifiedAddressInfo, String, String, String)> {
+    if seed.len() < 32 {
+        return Err(AppError::ValidationError(
+            "Seed must be at least 32 bytes".to_string(),
+        ));
+    }
+
+    // Generate transparent key from seed
+    let secp = Secp256k1::new();
+
+    let mut hasher = blake2b_simd::Params::new()
+        .hash_length(32)
+        .personal(b"ZcashTransparent")
+        .to_state();
+    hasher.update(seed);
+    let key_bytes = hasher.finalize();
+
+    let secret_key = SecretKey::from_slice(key_bytes.as_bytes())
+        .map_err(|e| AppError::InternalError(format!("Failed to generate secret key: {}", e)))?;
+
+    let public_key = PublicKey::from_secret_key(&secp, &secret_key);
+    let transparent_address = public_key_to_t_address(&public_key)?;
+    let private_key_hex = hex::encode(key_bytes.as_bytes());
+
+    // Derive Orchard keys
+    let (_, viewing_key) = OrchardKeyManager::derive_from_seed(seed, 0, birthday_height)
+        .map_err(|e| AppError::InternalError(format!("Failed to derive Orchard keys: {}", e)))?;
+
+    // Generate unified address
+    let mut address_manager = OrchardAddressManager::new(viewing_key.clone());
+    let unified_address = address_manager
+        .generate_unified_address()
+        .map_err(|e| AppError::InternalError(format!("Failed to generate unified address: {}", e)))?;
+
+    let viewing_key_encoded = viewing_key.encode();
+
+    Ok((
+        unified_address,
+        transparent_address,
+        private_key_hex,
+        viewing_key_encoded,
+    ))
+}
+
+/// Generate a new unified address for an existing Orchard account
+///
+/// # Arguments
+/// * `viewing_key_encoded` - The encoded viewing key
+/// * `address_index` - The address index to generate
+///
+/// # Returns
+/// * UnifiedAddressInfo for the new address
+pub fn generate_unified_address(
+    viewing_key_encoded: &str,
+    address_index: u32,
+) -> AppResult<UnifiedAddressInfo> {
+    let viewing_key = OrchardViewingKey::decode(viewing_key_encoded)
+        .map_err(|e| AppError::ValidationError(format!("Invalid viewing key: {}", e)))?;
+
+    let address_manager = OrchardAddressManager::new(viewing_key);
+    let address_info = address_manager
+        .generate_address_at_index(address_index)
+        .map_err(|e| AppError::InternalError(format!("Failed to generate address: {}", e)))?;
+
+    Ok(address_info)
+}
+
+/// Parse and validate a unified address
+///
+/// # Arguments
+/// * `address` - The unified address string (u1...)
+///
+/// # Returns
+/// * UnifiedAddressInfo with parsed components
+pub fn parse_unified_address(address: &str) -> AppResult<UnifiedAddressInfo> {
+    OrchardAddressManager::parse_unified_address(address)
+        .map_err(|e| AppError::ValidationError(format!("Invalid unified address: {}", e)))
+}
+
+/// Check if an address is a unified address
+pub fn is_unified_address(address: &str) -> bool {
+    address.starts_with("u1") && address.len() >= 100
 }
 
 #[cfg(test)]

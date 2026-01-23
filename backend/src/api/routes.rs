@@ -40,7 +40,17 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig, auth_service: Arc<AuthServ
                     .route("/settings/rpc/presets", web::get().to(handlers::get_rpc_presets))
                     .route("/settings/rpc", web::get().to(handlers::get_rpc_config))
                     .route("/settings/rpc", web::put().to(handlers::update_rpc_config))
-                    .route("/settings/rpc/test", web::post().to(handlers::test_rpc_endpoint)),
+                    .route("/settings/rpc/test", web::post().to(handlers::test_rpc_endpoint))
+                    // Orchard (Zcash privacy) routes
+                    .route("/wallets/{id}/orchard/enable", web::post().to(handlers::enable_orchard))
+                    .route("/wallets/{id}/orchard/addresses", web::get().to(handlers::get_unified_addresses))
+                    .route("/wallets/{id}/orchard/balance", web::get().to(handlers::get_shielded_balance))
+                    .route("/wallets/{id}/orchard/balance/combined", web::get().to(handlers::get_combined_balance))
+                    .route("/wallets/{id}/orchard/notes", web::get().to(handlers::get_unspent_notes))
+                    .route("/zcash/scan/status", web::get().to(handlers::get_scan_progress))
+                    .route("/zcash/scan/sync", web::post().to(handlers::sync_orchard))
+                    .route("/transfers/orchard", web::post().to(handlers::initiate_orchard_transfer))
+                    .route("/transfers/orchard/{id}/execute", web::post().to(handlers::execute_orchard_transfer)),
             ),
     );
 }

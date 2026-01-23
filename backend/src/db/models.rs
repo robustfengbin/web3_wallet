@@ -55,6 +55,8 @@ pub struct Wallet {
     pub chain: String,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
+    /// Block height when wallet was created (for Zcash Orchard scanning)
+    pub orchard_birthday_height: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +67,7 @@ pub struct WalletResponse {
     pub chain: String,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
+    pub orchard_birthday_height: Option<u64>,
 }
 
 impl From<Wallet> for WalletResponse {
@@ -76,6 +79,7 @@ impl From<Wallet> for WalletResponse {
             chain: wallet.chain,
             is_active: wallet.is_active,
             created_at: wallet.created_at,
+            orchard_birthday_height: wallet.orchard_birthday_height,
         }
     }
 }

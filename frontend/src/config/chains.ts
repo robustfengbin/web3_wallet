@@ -9,6 +9,27 @@ export interface ChainConfig {
   explorerUrl?: string;
   // Supported tokens on this chain (empty for non-EVM chains)
   tokens: TokenConfig[];
+  // Privacy features configuration (for Zcash)
+  privacyFeatures?: PrivacyFeaturesConfig;
+  // All supported address prefixes
+  addressPrefixes?: AddressPrefixConfig[];
+}
+
+export interface PrivacyFeaturesConfig {
+  /** Supports Orchard shielded pool */
+  supportsOrchard: boolean;
+  /** Supports Sapling shielded pool */
+  supportsSapling: boolean;
+  /** Default address type for new addresses */
+  defaultAddressType: 'transparent' | 'unified';
+  /** Enable privacy transfer UI */
+  enablePrivacyTransfer: boolean;
+}
+
+export interface AddressPrefixConfig {
+  type: 'transparent' | 'sapling' | 'unified';
+  prefix: string;
+  description: string;
 }
 
 export interface TokenConfig {
@@ -49,6 +70,18 @@ export const CHAINS: Record<string, ChainConfig> = {
     tokens: [
       { symbol: 'ZEC', name: 'Zcash', icon: 'Ⓩ', color: '#F4B728', decimals: 8 },
     ],
+    privacyFeatures: {
+      supportsOrchard: true,
+      supportsSapling: true,
+      defaultAddressType: 'unified',
+      enablePrivacyTransfer: true,
+    },
+    addressPrefixes: [
+      { type: 'transparent', prefix: 't1', description: 'Transparent (public)' },
+      { type: 'transparent', prefix: 't3', description: 'Transparent P2SH' },
+      { type: 'sapling', prefix: 'zs', description: 'Sapling (shielded)' },
+      { type: 'unified', prefix: 'u1', description: 'Unified (recommended)' },
+    ],
   },
   // Future chains can be added here:
   // solana: { ... },
@@ -80,4 +113,62 @@ export function getChainTokens(chainId: string): TokenConfig[] {
 export function isNativeToken(chainId: string, symbol: string): boolean {
   const chain = CHAINS[chainId];
   return chain?.symbol === symbol;
+}
+
+// Check if a chain supports privacy features
+export function supportsPrivacy(chainId: string): boolean {
+  const chain = CHAINS[chainId];
+  return chain?.privacyFeatures?.supportsOrchard === true;
+}
+
+// Check if a chain supports Orchard
+export function supportsOrchard(chainId: string): boolean {
+  const chain = CHAINS[chainId];
+  return chain?.privacyFeatures?.supportsOrchard === true;
+}
+
+// Get the default address type for a chain
+export function getDefaultAddressType(chainId: string): 'transparent' | 'unified' {
+  const chain = CHAINS[chainId];
+  return chain?.privacyFeatures?.defaultAddressType || 'transparent';
+}
+
+// Check if privacy transfer UI should be enabled
+export function isPrivacyTransferEnabled(chainId: string): boolean {
+  const chain = CHAINS[chainId];
+  return chain?.privacyFeatures?.enablePrivacyTransfer === true;
+}
+
+// Get address type from address string
+export function getAddressTypeFromAddress(chainId: string, address: string): string {
+  const chain = CHAINS[chainId];
+  if (!chain?.addressPrefixes) {
+    return 'unknown';
+  }
+
+  for (const prefix of chain.addressPrefixes) {
+    if (address.startsWith(prefix.prefix)) {
+      return prefix.type;
+    }
+  }
+
+  return 'unknown';
+}
+
+// Validate address format for a chain
+export function validateAddressFormat(chainId: string, address: string): boolean {
+  const chain = CHAINS[chainId];
+  if (!chain) return false;
+
+  // Check standard prefix
+  if (address.startsWith(chain.addressPrefix)) {
+    return true;
+  }
+
+  // Check all address prefixes
+  if (chain.addressPrefixes) {
+    return chain.addressPrefixes.some(p => address.startsWith(p.prefix));
+  }
+
+  return false;
 }

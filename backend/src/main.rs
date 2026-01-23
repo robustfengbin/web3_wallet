@@ -119,6 +119,7 @@ async fn main() -> std::io::Result<()> {
         wallet_repo,
         chain_registry.clone(),
         config.security.clone(),
+        pool.clone(),
     ));
     let transfer_service = Arc::new(TransferService::new(
         transfer_repo,
@@ -143,6 +144,23 @@ async fn main() -> std::io::Result<()> {
             }
         }
     });
+
+    // Pre-build Orchard proving key in background (expensive one-time operation)
+    // This ensures the first privacy transfer doesn't have to wait
+    tokio::spawn(async move {
+        tracing::info!("Pre-building Orchard proving key in background...");
+        // Run in blocking task since it's CPU-intensive
+        let result = tokio::task::spawn_blocking(|| {
+            blockchain::zcash::orchard::init_proving_key();
+        }).await;
+        match result {
+            Ok(_) => tracing::info!("Orchard proving key ready"),
+            Err(e) => tracing::warn!("Failed to pre-build Orchard proving key: {}", e),
+        }
+    });
+
+    // Start Orchard background sync task (syncs all Zcash wallets every 5 minutes)
+    wallet_service.clone().start_background_sync();
 
     let server_host = config.server.host.clone();
     let server_port = config.server.port;
