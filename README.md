@@ -2,18 +2,233 @@
 
 # Web3 Wallet Service
 
-A modular Web3 wallet management service with multi-chain support, featuring a Rust backend and React frontend.
+A modular Web3 wallet management service with multi-chain support, featuring a Rust backend and React frontend. **Now with full Zcash Orchard privacy protocol support.**
 
 ## Features
 
 - **Wallet Management** - Create, import, and manage multiple wallets with encrypted private key storage
-- **Multi-Chain Support** - Extensible architecture for multiple blockchain networks (Ethereum supported)
-- **Token Support** - Native and ERC20 tokens (USDT, USDC, DAI, WETH)
+- **Multi-Chain Support** - Extensible architecture for multiple blockchain networks (Ethereum, Zcash)
+- **Token Support** - Native tokens and ERC20 tokens (USDT, USDC, DAI, WETH)
+- **Zcash Privacy** - Full Orchard protocol with Halo 2 zero-knowledge proofs
+- **Four Transfer Modes** - Complete Zcash transfer types (T→T, T→Z, Z→Z, Z→T)
 - **Transfer Management** - Initiate, execute, and track transactions with real-time status updates
 - **Gas Estimation** - EIP-1559 compatible gas fee estimation
 - **RPC Management** - Dynamic RPC endpoint configuration with fallback support
 - **Role-Based Access** - Admin and Operator roles with permission controls
 - **Internationalization** - Multi-language frontend support
+
+---
+
+## Zcash Privacy Transfer Modes
+
+The system implements **all four Zcash transfer modes**, providing complete flexibility for privacy management:
+
+### Transfer Mode Comparison
+
+| Mode | From | To | Privacy Level | Use Case |
+|------|------|-----|---------------|----------|
+| **T→T** | Transparent | Transparent | None | Standard public transactions |
+| **T→Z** | Transparent | Shielded | Partial | Shielding funds for privacy |
+| **Z→Z** | Shielded | Shielded | Maximum | Fully private transactions |
+| **Z→T** | Shielded | Transparent | Partial | Deshielding for exchanges |
+
+### Mode Details
+
+#### 1. Transparent to Transparent (T→T)
+
+```
+┌─────────────┐                    ┌─────────────┐
+│  t1abc...   │ ───── ZEC ──────▶  │  t1xyz...   │
+│ (Sender)    │                    │ (Receiver)  │
+└─────────────┘                    └─────────────┘
+         Public on blockchain
+```
+
+- **Privacy**: None - all details visible on blockchain
+- **Speed**: Fast (~75 seconds confirmation)
+- **Use Case**: Public payments, exchange deposits/withdrawals
+- **API**: `POST /api/v1/transfers`
+
+#### 2. Transparent to Shielded (T→Z Shielding)
+
+```
+┌─────────────┐                    ┌─────────────┐
+│  t1abc...   │ ───── ZEC ──────▶  │  u1xyz...   │
+│ Transparent │      Shielding     │  Shielded   │
+└─────────────┘                    └─────────────┘
+    Visible                          Hidden
+```
+
+- **Privacy**: Partial - sender visible, receiver hidden
+- **Proof**: Halo 2 zero-knowledge proof generated
+- **Use Case**: Moving funds into privacy pool
+- **API**: `POST /api/v1/transfers/orchard` with `fund_source: "Transparent"`
+
+#### 3. Shielded to Shielded (Z→Z)
+
+```
+┌─────────────┐                    ┌─────────────┐
+│  u1abc...   │ ───── ZEC ──────▶  │  u1xyz...   │
+│  Shielded   │   Full Privacy     │  Shielded   │
+└─────────────┘                    └─────────────┘
+    Hidden          Hidden            Hidden
+         Maximum Privacy
+```
+
+- **Privacy**: Maximum - sender, receiver, and amount all hidden
+- **Proof**: Full Halo 2 proof (spend + output)
+- **Memo**: Optional 512-byte encrypted memo support
+- **Use Case**: Private payments, confidential business transactions
+- **API**: `POST /api/v1/transfers/orchard` with `fund_source: "Shielded"`
+
+#### 4. Shielded to Transparent (Z→T Deshielding)
+
+```
+┌─────────────┐                    ┌─────────────┐
+│  u1abc...   │ ───── ZEC ──────▶  │  t1xyz...   │
+│  Shielded   │    Deshielding     │ Transparent │
+└─────────────┘                    └─────────────┘
+    Hidden                           Visible
+```
+
+- **Privacy**: Partial - sender hidden, receiver visible
+- **Proof**: Halo 2 spend proof required
+- **Use Case**: Exchange deposits, public payments from private funds
+- **API**: `POST /api/v1/transfers/orchard` with transparent recipient address
+
+### Technical Implementation
+
+The Orchard privacy system uses:
+
+- **Halo 2**: Recursive zero-knowledge proof system (no trusted setup)
+- **Commitment Tree**: Merkle tree tracking all shielded notes
+- **Nullifiers**: Prevent double-spending without revealing note identity
+- **Incremental Witnesses**: Efficient proof path updates
+
+```rust
+// Fund source selection
+pub enum FundSource {
+    Auto,         // System chooses optimal source
+    Shielded,     // Force use shielded funds (Z→Z or Z→T)
+    Transparent,  // Force use transparent funds (T→Z)
+}
+```
+
+### Fee Structure (ZIP-317)
+
+| Actions | Fee (ZEC) |
+|---------|-----------|
+| 1-2 | 0.0001 |
+| 3-4 | 0.00015 |
+| 5+ | 0.00005 per additional |
+
+---
+
+## Enterprise Use Cases
+
+This system is designed for enterprise-grade cryptocurrency management with privacy features:
+
+### 1. Cryptocurrency Payment Gateway
+
+- **Scenario**: E-commerce platforms accepting ZEC payments
+- **Features Used**:
+  - Multi-wallet management for different merchants
+  - T→Z shielding for customer privacy
+  - Real-time balance and transaction tracking
+  - Webhook notifications for payment confirmation
+
+### 2. Treasury Management System
+
+- **Scenario**: Corporate treasury holding and managing crypto assets
+- **Features Used**:
+  - Role-based access (Admin/Operator separation of duties)
+  - Audit logs for compliance
+  - Multi-signature workflow (initiate → approve → execute)
+  - Encrypted private key storage with HSM integration potential
+
+### 3. OTC Trading Desk
+
+- **Scenario**: High-volume OTC cryptocurrency trading
+- **Features Used**:
+  - Z→Z transfers for confidential large trades
+  - Privacy protection for trade counterparties
+  - Batch transaction processing
+  - RPC failover for reliability
+
+### 4. Privacy-Focused Exchange
+
+- **Scenario**: Exchange offering privacy coin support
+- **Features Used**:
+  - T→Z for customer deposit shielding
+  - Z→T for withdrawal processing
+  - Automated balance reconciliation
+  - Compliance-ready audit trails
+
+### 5. Cross-Border Payment Service
+
+- **Scenario**: International remittance with privacy requirements
+- **Features Used**:
+  - Multi-chain support (ETH for speed, ZEC for privacy)
+  - Unified address management
+  - Transaction memo for payment references
+  - Multi-language interface
+
+### 6. Institutional Custody Solution
+
+- **Scenario**: Custodian managing crypto for institutional clients
+- **Features Used**:
+  - Segregated wallet per client
+  - View-only keys for auditors
+  - Cold/hot wallet separation
+  - Comprehensive logging and reporting
+
+### 7. DeFi Protocol Backend
+
+- **Scenario**: DeFi protocol requiring privacy features
+- **Features Used**:
+  - Programmable transaction workflows
+  - Gas optimization for Ethereum operations
+  - Privacy pool integration via Orchard
+  - API-first architecture for integration
+
+### Deployment Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Enterprise Deployment                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐    │
+│  │   Frontend   │     │   Backend    │     │   Database   │    │
+│  │   (React)    │────▶│   (Rust)     │────▶│   (MySQL)    │    │
+│  │   Port 3000  │     │   Port 8080  │     │   Port 3306  │    │
+│  └──────────────┘     └──────────────┘     └──────────────┘    │
+│                              │                                   │
+│                              ▼                                   │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │                    Blockchain Layer                       │  │
+│  │  ┌─────────────┐              ┌─────────────┐            │  │
+│  │  │  Ethereum   │              │   Zcash     │            │  │
+│  │  │  RPC Node   │              │  RPC Node   │            │  │
+│  │  │ (Geth/Infura)│             │(Zebrad/Zcashd)│           │  │
+│  │  └─────────────┘              └─────────────┘            │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Security Considerations for Enterprise
+
+| Aspect | Implementation |
+|--------|----------------|
+| Key Storage | AES-256-GCM encryption at rest |
+| Authentication | JWT with configurable expiration |
+| Authorization | Role-based (Admin/Operator) |
+| Audit | Comprehensive audit logging |
+| Network | HTTPS/TLS required in production |
+| Secrets | Environment-based configuration |
+
+---
 
 ## Screenshots
 
@@ -34,7 +249,9 @@ A modular Web3 wallet management service with multi-chain support, featuring a R
 ### Backend
 - **Rust** with Actix-web 4
 - **MySQL 5.7+** with SQLx
-- **Ethers-rs** for blockchain integration
+- **Ethers-rs** for Ethereum integration
+- **Orchard/Zcash crates** for Zcash privacy protocol
+- **Halo 2** zero-knowledge proof system
 - **AES-256-GCM** encryption for private keys
 - **JWT** authentication
 
@@ -52,19 +269,25 @@ github_web3_wallet_service/
 │   ├── src/
 │   │   ├── api/               # REST API endpoints and middleware
 │   │   ├── blockchain/        # Chain clients and token definitions
+│   │   │   ├── ethereum/      # Ethereum client and ERC20 tokens
+│   │   │   └── zcash/         # Zcash client and Orchard protocol
+│   │   │       └── orchard/   # Halo 2 proofs, notes, witnesses
 │   │   ├── services/          # Business logic layer
 │   │   ├── db/                # Database models and repositories
 │   │   ├── crypto/            # Encryption and password hashing
 │   │   └── config/            # Configuration management
 │   └── Cargo.toml
 │
-└── frontend/                   # React TypeScript frontend
-    ├── src/
-    │   ├── pages/             # Page components
-    │   ├── components/        # Reusable UI components
-    │   ├── services/          # API client modules
-    │   └── hooks/             # Custom React hooks
-    └── package.json
+├── frontend/                   # React TypeScript frontend
+│   ├── src/
+│   │   ├── pages/             # Page components
+│   │   ├── components/        # Reusable UI components
+│   │   ├── services/          # API client modules
+│   │   └── hooks/             # Custom React hooks
+│   └── package.json
+│
+└── docs/                       # Documentation
+    └── chrome-extension-technical-proposal.md
 ```
 
 ## Quick Start
@@ -184,6 +407,19 @@ npm run build
 | POST | `/api/v1/transfers/{id}/execute` | Execute pending transfer |
 | POST | `/api/v1/transfers/estimate-gas` | Estimate gas fees |
 
+### Zcash Orchard (Privacy)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/wallets/{id}/orchard/enable` | Enable Orchard for wallet |
+| GET | `/api/v1/wallets/{id}/orchard/addresses` | Get unified addresses |
+| GET | `/api/v1/wallets/{id}/orchard/balance` | Get shielded balance |
+| GET | `/api/v1/wallets/{id}/orchard/balance/combined` | Get combined balance |
+| GET | `/api/v1/wallets/{id}/orchard/notes` | List unspent notes |
+| POST | `/api/v1/transfers/orchard` | Initiate privacy transfer |
+| POST | `/api/v1/transfers/orchard/{id}/execute` | Execute privacy transfer |
+| GET | `/api/v1/zcash/scan/status` | Get sync status |
+| POST | `/api/v1/zcash/scan/sync` | Trigger manual sync |
+
 ### Settings
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -222,6 +458,9 @@ The service automatically creates the required tables on startup:
 - `transfers` - Transaction history and status
 - `audit_logs` - Security audit trail
 - `settings` - Application configuration
+- `orchard_sync_state` - Zcash blockchain sync progress per wallet
+- `orchard_notes` - Shielded notes (unspent outputs) with witness data
+- `orchard_tree_state` - Commitment tree state for proof generation
 
 ## Configuration
 
@@ -242,6 +481,10 @@ The service automatically creates the required tables on startup:
 | `WEB3_ETHEREUM__RPC_URL` | Ethereum RPC endpoint | - |
 | `WEB3_ETHEREUM__CHAIN_ID` | Ethereum chain ID | 1 |
 | `WEB3_ETHEREUM__RPC_PROXY` | Optional RPC proxy | - |
+| `WEB3_ZCASH__RPC_URL` | Zcash RPC endpoint | - |
+| `WEB3_ZCASH__RPC_USER` | Zcash RPC username | - |
+| `WEB3_ZCASH__RPC_PASSWORD` | Zcash RPC password | - |
+| `WEB3_ZCASH__RPC_PROXY` | Optional Zcash RPC proxy | - |
 
 ### Frontend Configuration
 
